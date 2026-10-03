@@ -1,159 +1,103 @@
-# YummyDownloader
+# YummyDownloader — форк (GUI + параллельная качка + yummyanime.tv)
 
-Download anime episodes from **YummyAnime** (`old.yummyani.me` and mirrors) **without ever opening the player** — so no first-second previews, no thumbnails, **no spoilers**.
+![version](https://img.shields.io/badge/version-1.0.0-blue) `VERSION: 1.0.0` · см. [CHANGELOG.md](CHANGELOG.md)
 
-It talks to the site's internal API, pulls the direct stream from the Kodik player, and saves clean `.mp4` files into per-title folders — keeping a **single voiceover (dub)** of your choice.
+> **English summary:** Fork of [foxycuter2-ai/YummyDownloader](https://github.com/foxycuter2-ai/YummyDownloader) with a tkinter GUI, parallel episode/segment downloads, and `yummyanime.tv` support via the same Kodik pipeline. Quality stays `max untouched` (no re-encoding).
 
-> 🇷🇺 Русская версия — ниже / [Russian version below](#-русская-версия).
+Форк оригинального [foxycuter2-ai/YummyDownloader](https://github.com/foxycuter2-ai/YummyDownloader):
+качалка аниме **без запуска плеера** (значит, без спойлеров-превью) — напрямую забирает
+HLS-поток из плеера Kodik и складывает чистые `.mp4` по папкам, по одной озвучке на выбор.
 
----
+## Чем отличается от upstream
 
-## Why
+- **GUI** (`yummy_gui.py`, tkinter, только стандартная библиотека): ссылка → «Проверить» →
+  озвучка / качество / серии / франшиза → «Скачать» / «Отмена». Прогресс по сериям и общий
+  (МБ, МБ/с), спинбокс «Потоки серий» 1–8, кнопка «Установить зависимости», фикс вставки
+  по Ctrl+V в русской раскладке.
+- **Скорость** (`seg_dl.py` + правки `yummy_dl.py`): параллельные серии (`workers=4` по умолчанию,
+  флаги `--workers/--segs`) + параллельные сегменты внутри серии (пул 8, до 32). Склейка
+  `ffmpeg -f concat -c copy` **без перекодирования**; при ошибке — fallback на прямой `ffmpeg -c copy`.
+- **`yummyanime.tv`** (`tv_adapter.py`): авто-детект ссылок `.tv`, handshake слотов (Alloha/Kodik),
+  переводы × сезоны serial-страницы Kodik, качка тем же конвейером (сегменты → fallback).
+- **Установка в 1 клик**: `Setup_Python.cmd` (автопроверка/установка Python 3.9+ + `requirements.txt`),
+  `Start_GUI.cmd` (запуск окна).
+- Качество не менялось: `max untouched` (потолок 720p), только плеер Kodik, CLI-совместимость сохранена.
+- Подробнее — [CHANGES_FORK.md](CHANGES_FORK.md) (полный список) и [CHANGELOG.md](CHANGELOG.md) (версии).
 
-The usual way (browser "video download" extensions) forces you to **press play** to capture the stream — which flashes the opening seconds and a scrubber preview at you. For people who hate spoilers, that's a dealbreaker. YummyDownloader never plays anything: it resolves the HLS playlist directly and hands it to `ffmpeg`.
+## Быстрый старт (Windows)
 
-## Features
+1. Двойной клик по **`Setup_Python.cmd`** — проверит Python 3.9+ (поставит 3.12 при отсутствии)
+   и установит зависимости из `requirements.txt`.
+2. Двойной клик по **`Start_GUI.cmd`** — откроется окно.
 
-- 🚫 **No spoilers** — the player is never opened.
-- 🎙️ **One dub, your pick** — interactive menu lists every voiceover actually available for the title (with episode counts).
-- 📺 **Quality select** — max / 480 / 360.
-- 🔢 **Episode ranges** — `5-12`, `3,7,9`, `5-`, or all.
-- 🗂️ **Folders per title**, with a `_dub.txt` note recording which voiceover was used.
-- 🧩 **Whole franchise** — optionally walk every season in the site's "viewing order".
-- ⏯️ **Resumable** — already-downloaded episodes are skipped.
-- 📦 **No system installs** — `ffmpeg` ships inside the `imageio-ffmpeg` pip package.
+Консольный вариант без GUI: `«Скачать аниме.cmd»` (только `old.yummyani.me`, интерактивные вопросы).
 
-## Telegram bot (`yummy_anime_bot.py`)
+## Использование GUI
 
-Beyond the CLI there's a self-contained Telegram bot: it searches several sources
-(YummyAnime/Kodik, AniLibria, Zona), downloads episodes and sends the video into
-the chat. It also downloads direct **YouTube/TikTok** links, supports large files
-(>50 MB) via a userbot + private storage channel, and has a `/share` mode to bundle
-several titles into one shareable code.
+1. Вставь ссылку (`old.yummyani.me/...` или `yummyanime.tv/...`), нажми **«Проверить»**.
+2. Выбери озвучку, качество (`max`/480/360), серии (`5-12`, `3,7,9`, `5-` или все),
+   при необходимости — франшизу (только для `.me`).
+3. **«Скачать»** — файлы лягут в `downloads/<Название>/Серия NN.mp4` + `_озвучка.txt`.
+4. **«Отмена»** останавливает качку; повторное «Скачать» докачивает упавшие серии
+   (готовые подхватываются как «уже есть»).
 
-**Secrets are never stored in code.** Copy the template and fill in your values:
+## Использование CLI
 
-```bash
-cp bot_secrets.example.json bot_secrets.json   # this file is git-ignored
+```bat
+py yummy_dl.py "https://old.yummyani.me/catalog/item/..."
+py yummy_dl.py --workers 4 --segs 8 "https://old.yummyani.me/catalog/item/..."
+py yummy_dl.py "https://yummyanime.tv/1234-nazvanie.html"
+py yummy_gui.py
 ```
 
-`bot_secrets.json` holds the bot token (from **@BotFather**), Telegram `api_id`/
-`api_hash` (from **my.telegram.org**), the storage-channel id and, if used, the
-userbot phone/2FA. Then run:
+Вопросы по порядку: **озвучка → качество → серии → вся франшиза? (.me) → подтверждение**,
+Enter = значение по умолчанию. Одна строка на серию в прежнем формате + строка
+`потоки: серии=N, сегменты=M`.
 
-```bash
-pip install certifi imageio-ffmpeg telethon cryptg python-socks
-python3 yummy_anime_bot.py
-```
+## Источники
 
-> ⚠️ Never commit `bot_secrets.json`, `bot_config.json` or `*.session` files —
-> they grant full access to your bot and Telegram account. They are already in
-> `.gitignore`.
-
-## Requirements
-
-- Python 3.9+
-- `pip install -r requirements.txt` (`certifi`, `imageio-ffmpeg`)
-- Network access to `kodikplayer.com` and the CDN `solodcdn.com`.
-  Some ISPs block the old `kodik.info` / `aniqit.com` domains via DNS — this tool only uses the live ones.
-
-## Install
-
-```bash
-git clone https://github.com/foxycuter2-ai/YummyDownloader.git
-cd YummyDownloader
-pip install -r requirements.txt
-cp config.example.json config.json   # optional: tweak defaults
-```
-
-## Usage
-
-```bash
-python yummy_dl.py "https://old.yummyani.me/catalog/item/...."
-```
-
-(Or run with no argument and paste the link when asked.)
-
-You'll be prompted, in order: **voiceover → quality → episodes → whole franchise? → confirm**. Press Enter at any prompt to take the default.
-
-Files land in `downloads/<Title>/Серия NN.mp4`.
-
-### Windows one-click
-
-Double-click **`Скачать аниме.cmd`** in the folder, paste the link, answer the prompts.
-
-## Configuration — `config.json`
-
-| Key | Meaning |
+| Источник | Как работает |
 |---|---|
-| `preferred_dubbings` | Priority list; the first one available for a title is pre-selected as default. e.g. `AniLibria`, `AniStar`, `Dream Cast`, `AnimeVost`, `AniDUB`, `AniMaunt`. |
-| `quality` | `"max"` (≈720p), `"480"`, or `"360"`. |
-| `all_seasons` | `true` to walk every season of the franchise. |
-| `output_dir` | Where files go (default: `downloads/` next to the script). |
-| `site` | Base site URL. |
+| `old.yummyani.me` (+ зеркала) | Внутренний API `/api/anime/<id>/videos` → Kodik iframe → POST `/ftor` → m3u8. Есть франшиза («порядок просмотра»). |
+| `yummyanime.tv` | `tv_adapter.py`: handshake карточки → слоты плееров → serial-iframe Kodik → переводы × сезоны/серии → POST `/ftor` → m3u8 тем же конвейером. Детект автоматический. |
 
-## How it works
+## Параметры потоков
 
-1. Read the numeric `page_id` from the title page.
-2. `GET /api/anime/<id>/videos` → all episodes, dub names, Kodik iframe URLs.
-3. For the chosen dub, fetch each Kodik iframe, POST to `/ftor`, and decode the obfuscated link (base64 + a variable letter-shift cipher — brute-forced over all 26 shifts, picking the result containing `m3u8`).
-4. `ffmpeg -c copy` pulls the HLS stream into `.mp4`.
+| Параметр | Где | Дефолт | Диапазон |
+|---|---|---|---|
+| `workers` (параллельных серий) | `config.json`, `--workers N`, спинбокс GUI | 4 | 1–8 |
+| `seg_workers` (параллельных сегментов) | `config.json`, `--segs N` / `--seg-workers N` | 8 | 1–32 |
 
-## Legal
+Склейка сегментов — `ffmpeg -c copy`, без перекодирования (битрейт untouched).
+Проверка синтаксиса: `py -m py_compile yummy_dl.py seg_dl.py yummy_gui.py tv_adapter.py`.
 
-For **personal/offline use** of content you're entitled to access. You are responsible for complying with YummyAnime's terms and your local copyright law. This project ships no content and is not affiliated with YummyAnime, Kodik, or any rights holder.
+## Требования
 
-## License
+- Python 3.9+ (поставит `Setup_Python.cmd`), пакеты `certifi` + `imageio-ffmpeg`
+  (`pip install -r requirements.txt`; `ffmpeg` отдельно не нужен — он внутри `imageio-ffmpeg`).
+- Сеть: доступ к `kodikplayer.com` и CDN `solodcdn.com`. Без VPN хождение напрямую;
+  **с VPN для Kodik нужны DIRECT-исключения** (пример для mihomo — 6 правил `DOMAIN-SUFFIX ... DIRECT`:
+  `kodikplayer.com`, `kodik.cc`, `solodcdn.com`, `yummyani.me`, `yani.tv`, `aniliberty.top`).
+- GUI нужен `tcl/tk` (идёт с официальным установщиком python.org).
 
-[MIT](LICENSE)
+## Известные ограничения
 
----
+- **Alloha/CVH не реализованы** — слот плеера виден при handshake `.tv`, но качается только Kodik.
+- **`.tv` без VPN**: напрямую работает; через egress с блокировкой Kodik отдаёт 500 —
+  лечится прокси + DIRECT-исключениями (см. выше), настройка сервера к коду отношения не имеет.
+- **Франшиза только для `.me`** — у карточки `.tv` нет `viewing_order`; чекбокс GUI для `.tv` пуст.
+- Для `.tv` качается выбранный сезон serial-страницы (selected, иначе максимальный);
+  нулевой сезон (спешлы) по умолчанию не берётся.
+- Потолок качества 720p — как в upstream.
 
-## 🇷🇺 Русская версия
+## Конфигурация — `config.json`
 
-Качалка аниме с **YummyAnime** (`old.yummyani.me` и зеркала) **без запуска плеера** — значит, никаких превью первых секунд, никаких миниатюр, **никаких спойлеров**.
+Скопируй `config.example.json` в `config.json`. Ключи: `preferred_dubbings` (приоритет озвучек),
+`quality` (`max`/480/360), `all_seasons` (франшиза `.me`), `output_dir`, `site`,
+плюс `workers` / `seg_workers` (см. таблицу выше).
 
-Программа сама дёргает внутренний API сайта, берёт прямой поток из плеера Kodik и складывает чистые `.mp4` по папкам, сохраняя **одну озвучку** на твой выбор.
+## Правовая оговорка
 
-### Зачем
-
-Обычные браузерные «скачивалки видео» требуют **нажать play**, чтобы перехватить поток — а это показывает первые секунды и предпросмотр на перемотке. Кто не любит спойлеры — поймёт. Здесь плеер не запускается вообще: m3u8 достаётся напрямую и отдаётся `ffmpeg`.
-
-### Возможности
-
-- 🚫 **Без спойлеров** — плеер не открывается.
-- 🎙️ **Одна озвучка** — меню показывает реально доступные для тайтла озвучки (с числом серий).
-- 📺 **Выбор качества** — макс / 480 / 360.
-- 🔢 **Диапазоны серий** — `5-12`, `3,7,9`, `5-` или все.
-- 🗂️ **Папки по тайтлам** + файл `_озвучка.txt`.
-- 🧩 **Вся франшиза** — по «порядку просмотра» с сайта.
-- ⏯️ **Докачка** — уже скачанные серии пропускаются.
-- 📦 **Без установок в систему** — `ffmpeg` внутри пакета `imageio-ffmpeg`.
-
-### Установка
-
-```bash
-git clone https://github.com/foxycuter2-ai/YummyDownloader.git
-cd YummyDownloader
-pip install -r requirements.txt
-```
-
-### Запуск
-
-```bash
-python yummy_dl.py "https://old.yummyani.me/catalog/item/...."
-```
-
-Спросит по порядку: **озвучка → качество → серии → вся франшиза? → подтверждение**. Enter = значение по умолчанию.
-
-**Windows в один клик:** двойной клик по **`Скачать аниме.cmd`**, вставь ссылку, отвечай на вопросы.
-
-Файлы появятся в `downloads/<Название>/Серия NN.mp4`.
-
-### Требования к сети
-
-Нужен доступ к `kodikplayer.com` и CDN `solodcdn.com`. Старые домены `kodik.info` / `aniqit.com` у многих провайдеров блокируются по DNS — тут они не используются.
-
-### Лицензия и оговорка
-
-Для личного офлайн-использования контента, к которому у тебя есть легальный доступ. Соблюдение правил сайта и авторского права — на тебе. Проект не содержит контента и не связан с YummyAnime/Kodik. Лицензия [MIT](LICENSE).
+Для личного офлайн-использования контента, к которому есть легальный доступ. Соблюдение правил
+сайтов и авторского права — на пользователе. Проект не содержит контента и не связан
+с YummyAnime / yummyanime.tv / Kodik / Alloha. Лицензия [MIT](LICENSE).
