@@ -1,0 +1,8 @@
+{
+  "preferred_dubbings": ["AniLibria", "AniStar", "Dream Cast", "AnimeVost", "AniDUB"],
+  "quality": "max",
+  "all_seasons": false,
+  "only_kodik": true,
+  "output_dir": "downloads",
+  "site": "https://old.yummyani.me"
+}
