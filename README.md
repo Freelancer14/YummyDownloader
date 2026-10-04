@@ -1,6 +1,6 @@
 # YummyDownloader — форк (GUI + параллельная качка + yummyanime.tv)
 
-![version](https://img.shields.io/badge/version-1.0.0-blue) `VERSION: 1.0.0` · см. [CHANGELOG.md](CHANGELOG.md)
+![version](https://img.shields.io/badge/version-1.0.4-blue) `VERSION: 1.0.4` · см. [CHANGELOG.md](CHANGELOG.md)
 
 > **English summary:** Fork of [foxycuter2-ai/YummyDownloader](https://github.com/foxycuter2-ai/YummyDownloader) with a tkinter GUI, parallel episode/segment downloads, and `yummyanime.tv` support via the same Kodik pipeline. Quality stays `max untouched` (no re-encoding).
 
@@ -16,13 +16,14 @@ HLS-поток из плеера Kodik и складывает чистые `.mp
   по Ctrl+V в русской раскладке.
 - **Скорость** (`seg_dl.py` + правки `yummy_dl.py`): параллельные серии (`workers=4` по умолчанию,
   флаги `--workers/--segs`) + параллельные сегменты внутри серии (пул 8, до 32). Склейка
-  `ffmpeg -f concat -c copy` **без перекодирования**; при ошибке — fallback на прямой `ffmpeg -c copy`.
+  `ffmpeg -f concat -c copy` **без перекодирования** с пересчетом меток (`+genpts+igndts`,
+  `avoid_negative_ts make_zero`, `aac_adtstoasc` — фикс фризов в 1.0.1+); при ошибке — fallback на прямой `ffmpeg -c copy`.
 - **`yummyanime.tv`** (`tv_adapter.py`): авто-детект ссылок `.tv`, handshake слотов (Alloha/Kodik),
   переводы × сезоны serial-страницы Kodik, качка тем же конвейером (сегменты → fallback).
 - **Установка в 1 клик**: `Setup_Python.cmd` (автопроверка/установка Python 3.9+ + `requirements.txt`),
   `Start_GUI.cmd` (запуск окна).
 - Качество не менялось: `max untouched` (потолок 720p), только плеер Kodik, CLI-совместимость сохранена.
-- Подробнее — [CHANGES_FORK.md](CHANGES_FORK.md) (полный список) и [CHANGELOG.md](CHANGELOG.md) (версии).
+- Подробнее — [CHANGES_FORK.md](docs/CHANGES_FORK.md) (полный список) и [CHANGELOG.md](CHANGELOG.md) (версии).
 
 ## Быстрый старт (Windows)
 
@@ -71,6 +72,19 @@ Enter = значение по умолчанию. Одна строка на с�
 Склейка сегментов — `ffmpeg -c copy`, без перекодирования (битрейт untouched).
 Проверка синтаксиса: `py -m py_compile yummy_dl.py seg_dl.py yummy_gui.py tv_adapter.py`.
 
+> **1.0.1 — фикс фризов:** склейка `.ts`-сегментов рвала PTS/DTS на стыках. Лечение:
+> `concat` с `-fflags +genpts+igndts -avoid_negative_ts make_zero -bsf:a aac_adtstoasc`.
+> Шифрованные (`#EXT-X-KEY:AES-128`) и fmp4 (`#EXT-X-MAP`) плейлисты сегментным путем
+> не качаем — сразу fallback на прямой `ffmpeg -c copy`. Битые серии перекачай
+> (удали `Серия NN.mp4` и нажми «Скачать»).
+>
+> **1.0.2:** склейка v2 — бинарный кат `.ts` в один `combined.ts` + один ремукс
+> (`+genpts+discardcorrupt`), проверка sync-byte `0x47`, `DISCONTINUITY/GAP` тоже
+> уходят в прямой `ffmpeg` с нативным HLS-демуксером. Диагностика:
+> `py yummy_dl.py --segs 0 "<ссылка>"` — форсирует прямой путь; если на нем чисто,
+> а на сегментном нет — виновата склейка, кидай лог строки `(сегменты не вышли: ...)`.
+> Битые серии перед тестом удали.
+
 ## Требования
 
 - Python 3.9+ (поставит `Setup_Python.cmd`), пакеты `certifi` + `imageio-ffmpeg`
@@ -94,7 +108,20 @@ Enter = значение по умолчанию. Одна строка на с�
 
 Скопируй `config.example.json` в `config.json`. Ключи: `preferred_dubbings` (приоритет озвучек),
 `quality` (`max`/480/360), `all_seasons` (франшиза `.me`), `output_dir`, `site`,
-плюс `workers` / `seg_workers` (см. таблицу выше).
+плюс `workers` / `seg_workers` (см. таблицу выше; `seg_workers: 0` — прямой ffmpeg без сегментов).
+
+## Структура папки (GUI-only)
+
+- Корень — только GUI: `yummy_gui.py`, ядро `yummy_dl.py` / `seg_dl.py` / `tv_adapter.py`,
+  `Start_GUI.cmd`, `Setup_Python.cmd`, `requirements.txt`, `config.example.json`,
+  `README.md`, `CHANGELOG.md`, `VERSION`, `LICENSE`.
+- `docs/` — `CHANGES_FORK.md` (история форка).
+- `_legacy/` — бот (`yummy_bot.py`, `yummy_anime_bot.py`), `link_replacer.py`,
+  консольный запуск и `.sh`-скрипты. GUI их не использует.
+
+> ZIP с GitHub: `.cmd` должны лежать с CRLF (иначе `cmd.exe` рвет строки).
+> `.gitattributes` фиксирует `*.cmd/*.bat → eol=crlf`, так что свежий архив
+> запускается двойным кликом без ошибок `'...' is not recognized`.
 
 ## Правовая оговорка
 

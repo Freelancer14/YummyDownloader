@@ -448,22 +448,43 @@ def gui_download_hls(m3u8_url, out_path, emit=None, stop_flag=None, attempts=3,
 # не срабатывает. Маппинг ниже чинит вставку/копирование/вырезание
 # без вмешательства в латинскую раскладку (там отдаем Tk по умолчанию).
 
+# Физические клавиши V/C/X/A: на Windows event.keycode — это VK-код,
+# одинаковый при любой раскладке (86/67/88/65). Keysym же зависит от языка
+# (Cyrillic_em вместо v и т.д.), поэтому штатный Ctrl+V в Entry молча
+# не срабатывает. Сначала смотрим keycode, keysym — запасной путь.
+
+_WIN_CTRL_KEYCODES = {
+    86: "paste",       # V — вставить
+    67: "copy",        # C — копировать
+    88: "cut",         # X — вырезать
+    65: "select_all",  # A — выделить все
+}
+
 _RU_CTRL_ACTIONS = {
     "cyrillic_em": "paste",  # клавиша V — вставить
     "cyrillic_es": "copy",   # клавиша C — копировать
-    "cyrillic_ha": "cut",    # клавиша X — вырезать
+    "cyrillic_che": "cut",   # клавиша X — вырезать (позиция X = Ч, не Х)
+    "cyrillic_ha": "cut",    # оставляем: вдруг Tk отдаст Х
     "cyrillic_ef": "select_all",  # клавиша A — выделить все
     # те же буквы прямым текстом — на всякий случай, если Tk отдаст символ
     "м": "paste", "М": "paste",
     "с": "copy", "С": "copy",
+    "ч": "cut", "Ч": "cut",
     "х": "cut", "Х": "cut",
     "ф": "select_all", "Ф": "select_all",
 }
 
 
-def ctrl_key_action(keysym):
+def ctrl_key_action(keysym, keycode=None):
     """Что делать при Ctrl+клавиша в поле ввода.
     Возвращает 'paste'/'copy'/'cut'/'select_all' или None (пусть Tk сам)."""
+    if keycode is not None and sys.platform.startswith("win"):
+        try:
+            hit = _WIN_CTRL_KEYCODES.get(int(keycode))
+        except (TypeError, ValueError):
+            hit = None
+        if hit:
+            return hit
     if not keysym:
         return None
     hit = _RU_CTRL_ACTIONS.get(keysym) or _RU_CTRL_ACTIONS.get(keysym.lower())
@@ -962,7 +983,8 @@ class App:
 
     # -- вставка в поля (Ctrl+V при RU-раскладке, Shift+Insert, меню по ПКМ) --
     def _on_entry_ctrl(self, event):
-        action = ctrl_key_action(getattr(event, "keysym", ""))
+        action = ctrl_key_action(getattr(event, "keysym", ""),
+                                 getattr(event, "keycode", None))
         if not action:
             return None  # латинская раскладка — штатная обработка Tk
         w = event.widget

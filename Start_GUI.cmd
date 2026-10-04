@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 >nul
 setlocal EnableDelayedExpansion
-title YummyDownloader — окно
+title YummyDownloader - окно
 cd /d "%~dp0"
 
-rem DRYRUN=1 — только показать, что было бы запущено.
+rem DRYRUN=1 - только показать, что было бы запущено.
 
 set "PYCMD="
 for %%V in (3.12 3.11 3.10 3.9) do (

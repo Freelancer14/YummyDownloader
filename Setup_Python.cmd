@@ -4,11 +4,11 @@ setlocal EnableDelayedExpansion
 title Установка Python для YummyDownloader
 cd /d "%~dp0"
 
-rem DRYRUN=1 — только показать ветки детекта, ничего не ставить и не качать.
+rem DRYRUN=1 - только показать ветки детекта, ничего не ставить и не качать.
 if defined DRYRUN echo [DRYRUN] тестовый прогон, установка выполняться не будет.
 
 echo ==============================================================
-echo  YummyDownloader — проверка и установка Python
+echo  YummyDownloader - проверка и установка Python
 echo ==============================================================
 echo.
 
@@ -26,7 +26,7 @@ for %%V in (3.12 3.11 3.10 3.9) do (
   )
 )
 
-rem --- Шаг 2: запасные варианты — python / py с проверкой версии >= 3.9 ---
+rem --- Шаг 2: запасные варианты - python / py с проверкой версии >= 3.9 ---
 if not defined PYCMD (
   python -c "import sys; raise SystemExit(0 if sys.version_info>=(3,9) else 1)" >nul 2>&1
   if !ERRORLEVEL! equ 0 (
@@ -133,7 +133,7 @@ if %ERRORLEVEL% neq 0 (
 echo.
 echo ==============================================================
 echo  [OK] Готово: Python %PYVER%, зависимости стоят.
-echo  Дальше: Start_GUI.cmd — запуск окна, «Скачать аниме.cmd» — консоль.
+echo  Дальше: Start_GUI.cmd - запуск окна, "Скачать аниме.cmd" - консоль.
 echo ==============================================================
 pause
 exit /b 0

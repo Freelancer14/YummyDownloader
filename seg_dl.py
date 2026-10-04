@@ -140,6 +140,34 @@ def parse_segments(text, base_url):
     return segs
 
 
+_KEY_RE = re.compile(r"#EXT-X-KEY:[^\r\n]*METHOD=([^,\s]+)", re.I)
+
+
+def playlist_needs_fallback(media_text):
+    """Плейлисты, которые сегментным путем не тянем.
+
+    Возвращает строку-причину (и вызывающий код должен уйти в fallback
+    на прямой ffmpeg с нативным HLS-демуксером), либо None."""
+    txt = media_text or ""
+    m = _KEY_RE.search(txt)
+    if m and m.group(1).strip().upper() not in ("NONE",):
+        return "encrypted HLS (%s)" % m.group(1).strip()
+    if "#EXT-X-MAP" in txt:
+        return "fmp4 init segment (EXT-X-MAP)"
+    if "#EXT-X-DISCONTINUITY" in txt or "#EXT-X-GAP" in txt:
+        return "discontinuity/gap (рвутся PTS, нужен нативный HLS-демуксер)"
+    return None
+
+
+def _is_mpegts(path):
+    """Грубая проверка: .ts должен начинаться с sync-byte 0x47."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(1) == b"\x47"
+    except Exception:
+        return False
+
+
 # ------------------------------------------------------------------ download
 def download_one(url, ref=None, timeout=_TIMEOUT, retries=_RETRIES):
     """Один сегмент в память, ретраи + backoff. Иначе SegError."""
@@ -237,34 +265,94 @@ def download_segments(seg_urls, tmpdir, ref=None, seg_workers=8,
     return paths
 
 
+def _run(cmd, cwd=None):
+    """Запустить ffmpeg, вернуть (rc, stderr_tail)."""
+    try:
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           text=True, timeout=600, cwd=cwd)
+        err = (r.stderr or "").strip().splitlines()
+        tail = err[-1][:200] if err else ""
+        return r.returncode, tail, os.path.exists(cmd[-1]) if cmd else False
+    except Exception as e:
+        return 1, str(e)[:200], False
+
+
 def concat_copy(part_files, out_tmp):
-    """Склейка без перекодирования. True/False (False -> вызывающий код fallback'ит)."""
+    """Склейка без перекодирования. True/False (False -> вызывающий код fallback'ит).
+
+    v2: concat-демуксер даже с +genpts оставляет микрофризы на стыках .ts.
+    Поэтому основной путь — бинарный кат всех .ts в один combined.ts
+    (HLS-сегменты для этого и спроектированы) + один ремукс
+    `ffmpeg -i combined.ts -c copy`. Это ближе к нативному HLS-демуксеру,
+    чем склейка по файлам. Не вышло — пробуем старый concat-демуксер,
+    не вышло и он — False (caller уйдет на прямой ffmpeg с m3u8).
+    Не-TS файлы (нет sync-byte 0x47) сразу в fallback."""
     if not part_files:
         return False
     partdir = os.path.dirname(os.path.abspath(part_files[0]))
     lst = os.path.join(partdir, "concat.txt")
+    combined = os.path.join(partdir, "combined.ts")
+    out_abs = os.path.abspath(out_tmp)
     try:
-        with open(lst, "w", encoding="utf-8") as f:
-            for p in part_files:
-                name = os.path.basename(p).replace("'", "'\\''")
-                f.write("file '%s'\n" % name)
-        # относительные имена в списке -> работаем в cwd=tmpdir
+        for p in part_files:
+            try:
+                if os.path.getsize(p) <= 0 or not _is_mpegts(p):
+                    return False
+            except OSError:
+                return False
+        # 1) бинарный кат -> combined.ts
+        try:
+            with open(combined, "wb") as out:
+                for p in part_files:
+                    with open(p, "rb") as f:
+                        shutil.copyfileobj(f, out, length=1024 * 256)
+        except Exception:
+            return False
+        # 2) один ремукс combined.ts -> mp4
         cmd = [FFMPEG, "-y", "-loglevel", "error",
-               "-f", "concat", "-safe", "0", "-i", os.path.basename(lst),
-               "-c", "copy", os.path.abspath(out_tmp)]
-        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           text=True, timeout=600, cwd=partdir)
-        ok = (r.returncode == 0 and os.path.exists(out_tmp)
-              and os.path.getsize(out_tmp) >= 10000)
-        return ok
+               "-fflags", "+genpts+discardcorrupt",
+               "-i", combined,
+               "-c", "copy", "-bsf:a", "aac_adtstoasc", out_abs]
+        rc, tail, _ = _run(cmd)
+        if rc == 0 and os.path.exists(out_abs) and os.path.getsize(out_abs) >= 10000:
+            return True
+        last_tail = tail
+        # 3) запасной: concat-демуксер с пересчетом меток
+        try:
+            with open(lst, "w", encoding="utf-8") as f:
+                for p in part_files:
+                    name = os.path.basename(p).replace("'", "'\\''")
+                    f.write("file '%s'\n" % name)
+            cmd2 = [FFMPEG, "-y", "-loglevel", "error",
+                    "-f", "concat", "-safe", "0", "-i", os.path.basename(lst),
+                    "-fflags", "+genpts+igndts", "-avoid_negative_ts", "make_zero",
+                    "-c", "copy", "-bsf:a", "aac_adtstoasc", out_abs]
+            rc2, tail2, _ = _run(cmd2, cwd=partdir)
+            if rc2 == 0 and os.path.exists(out_abs) and os.path.getsize(out_abs) >= 10000:
+                return True
+            last_tail = tail2 or last_tail
+        except Exception:
+            pass
+        try:
+            if os.path.exists(out_abs):
+                os.remove(out_abs)
+        except Exception:
+            pass
+        # причину оставляем в файле-марке для диагностики caller'а через исключение
+        concat_copy.last_error = last_tail or "ffmpeg remux failed"
+        return False
     except Exception:
         return False
     finally:
-        try:
-            if os.path.exists(lst):
-                os.remove(lst)
-        except Exception:
-            pass
+        for tmp in (lst, combined):
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
+
+
+concat_copy.last_error = ""
 
 
 def download_hls_segmented(m3u8_url, out_path, seg_workers=8, ref=None,
@@ -280,6 +368,9 @@ def download_hls_segmented(m3u8_url, out_path, seg_workers=8, ref=None,
         raise
     except Exception as e:
         raise SegError("плейлист: %s" % str(e)[:150])
+    reason = playlist_needs_fallback(media)
+    if reason:
+        raise SegError("fallback нужен: %s" % reason)
     segs = parse_segments(media, media_url)
     if not segs:
         raise SegError("в плейлисте нет сегментов")
@@ -293,7 +384,9 @@ def download_hls_segmented(m3u8_url, out_path, seg_workers=8, ref=None,
         if _stopped(is_stopped):
             raise Stopped()
         if not concat_copy(parts, tmp):
-            raise SegError("ffmpeg concat не смог склеить")
+            detail = getattr(concat_copy, "last_error", "") or ""
+            raise SegError("ffmpeg concat не смог склеить%s" % (
+                (": " + detail[:120]) if detail else ""))
         os.replace(tmp, out_path)
         return os.path.getsize(out_path)
     except (Stopped, SegError):

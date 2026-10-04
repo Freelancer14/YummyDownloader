@@ -151,18 +151,29 @@ def download_hls(m3u8, out_path, attempts=3, progress_cb=None, is_stopped=None,
     """Скачать серию. Сначала сегментный путь (пул потоков + concat без
     перекодирования), при неудаче — старый ffmpeg -c copy напрямую с m3u8.
 
+    seg_workers=0 — форсировать прямой ffmpeg (для проверки: если микрофризы
+    уходят на прямом пути, виновата склейка; если остаются — источник).
+
     progress_cb(done_count, total_count, bytes_done) — для GUI.
     is_stopped: threading.Event или callable — остановка пробрасывается наружу
     как исключение Stopped из seg_dl (CLI его не ловит специально)."""
-    if seg_workers is None:
-        try:
-            seg_workers = max(1, int(CFG.get("seg_workers", 8) or 8))
-        except Exception:
-            seg_workers = 8
     try:
-        import seg_dl
-    except ImportError:
-        seg_dl = None
+        _sw = int(seg_workers) if seg_workers is not None else None
+    except Exception:
+        _sw = None
+    if _sw is None:
+        try:
+            _sw = max(1, int(CFG.get("seg_workers", 8) or 8))
+        except Exception:
+            _sw = 8
+    seg_workers = _sw
+    if seg_workers <= 0:
+        seg_dl = None  # прямой путь ниже
+    else:
+        try:
+            import seg_dl
+        except ImportError:
+            seg_dl = None
     if seg_dl is not None:
         try:
             seg_dl.download_hls_segmented(m3u8, out_path, seg_workers=seg_workers,
@@ -669,8 +680,9 @@ if __name__ == "__main__":
     run_cfg = dict(CFG)
     if workers:
         run_cfg["workers"] = max(1, min(workers, 8))
-    if segs:
-        run_cfg["seg_workers"] = max(1, min(segs, 32))
+    if segs is not None:
+        # 0 = форсировать прямой ffmpeg без сегментов (диагностика микрофризов)
+        run_cfg["seg_workers"] = max(0, min(segs, 32))
     if not args:
         url = input("Вставь ссылку на тайтл: ").strip()
         args = [url] if url else []

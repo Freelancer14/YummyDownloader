@@ -2,9 +2,41 @@
 
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версии — [Semantic Versioning](https://semver.org/). Полный перечень изменений
-форка — в [CHANGES_FORK.md](CHANGES_FORK.md).
+форка — в [CHANGES_FORK.md](docs/CHANGES_FORK.md).
 
 ## [Unreleased]
+
+## [1.0.4] — 2026-10-04
+
+### Fixed
+
+- `.gitattributes`: `*.cmd/*.bat → eol=crlf` — ZIP с GitHub больше не ломает
+  запуск (`cmd.exe` требует CRLF); все `.cmd` нормализованы в UTF-8 без BOM + CRLF.
+
+## [1.0.3] — 2026-10-04
+
+### Fixed
+
+- `yummy_gui.py`: Ctrl+V/C/X/A при русской раскладке — маппинг по физическому
+  keycode (VK-код не зависит от языка), keysym как запасной путь; чинен cut
+  (позиция X = Ч `cyrillic_che`, а не Х).
+
+## [1.0.2] — 2026-10-04
+
+### Fixed
+
+- `seg_dl.py`: склейка v2 — бинарный кат `.ts` + один ремукс вместо concat-демуксера;
+  проверка TS sync-byte, `DISCONTINUITY/GAP` → fallback на прямой ffmpeg.
+- `yummy_dl.py`: `--segs 0` форсирует прямой `ffmpeg` (диагностика склейки vs источника).
+
+## [1.0.1] — 2026-10-04
+
+### Fixed
+
+- `seg_dl.py`: фризы на стыках сегментов — `concat_copy()` с `+genpts+igndts`,
+  `avoid_negative_ts make_zero`, `aac_adtstoasc`; детект `EXT-X-KEY` / `EXT-X-MAP`
+  с fallback на прямой `ffmpeg -c copy`.
+- `*.cmd`: CRLF + UTF-8 без BOM (чинится запуск двойным кликом после ZIP с GitHub).
 
 ## [1.0.0] — 2026-10-03
 
