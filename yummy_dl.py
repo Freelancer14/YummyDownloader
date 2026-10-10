@@ -36,6 +36,8 @@ for _s in (sys.stdout, sys.stderr):
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG = {
     "preferred_dubbings": ["AniLibria", "AniStar", "Dream Cast", "AnimeVost", "AniDUB"],
+    "allow_subtitles": True,       # False — скрыть сабы из выбора (CLI: --no-subs)
+    "preferred_subs": ["Crunchyroll"],  # сабы на случай, если озвучек нет
     "quality": "max",            # "max" | "720" | "480" | "360"
     "all_seasons": False,        # True — пройти все сезоны франшизы (viewing_order)
     "only_kodik": True,          # качаем только из плеера Kodik (самый надёжный)
@@ -207,6 +209,18 @@ def download_hls(m3u8, out_path, attempts=3, progress_cb=None, is_stopped=None,
     raise RuntimeError("ffmpeg не справился: " + last_err)
 
 # --------------------------------------------------------------------------- core
+SUB_PREFIX = "[саб] "
+SUB_SUFFIX = " (Субтитры)"
+
+def is_sub(name):
+    """True, если группа — субтитры, а не озвучка.
+
+    Ядро маркирует сабы префиксом '[саб] ' (kodik_groups, tv_enumerate);
+    суффикс ' (Субтитры)' принимается для совместимости со старыми именами.
+    """
+    n = str(name or "")
+    return n.startswith(SUB_PREFIX) or SUB_SUFFIX in n
+
 def kodik_groups(items):
     """Сгруппировать серии по озвучке (только плеер Kodik)."""
     groups = {}
@@ -223,14 +237,31 @@ def kodik_groups(items):
         groups.setdefault(dub, {})[num] = iframe
     return groups
 
-def choose_dubbing(groups, prefs):
+def choose_dubbing(groups, prefs, allow_subs=True, sub_prefs=None):
+    """Выбор группы по умолчанию: озвучка в приоритете.
+
+    Сабы — только если озвучек нет (сначала по sub_prefs, иначе самая
+    полная группа) или выбраны явно (dub_override в grab_* обходит
+    этот приоритет). При allow_subs=False сабы исключаются полностью
+    (одни сабы -> None).
+    """
     names = list(groups.keys())
-    for p in prefs:
-        for n in names:
+    dubs = [n for n in names if not is_sub(n)]
+    subs = [n for n in names if is_sub(n)]
+    for p in prefs or []:
+        for n in dubs:
             if p.lower() in n.lower():
                 return n
-    # иначе — где больше всего серий
-    return max(names, key=lambda n: len(groups[n])) if names else None
+    if dubs:
+        # иначе — озвучка, где больше всего серий
+        return max(dubs, key=lambda n: len(groups[n]))
+    if allow_subs and subs:
+        for p in sub_prefs or []:
+            for n in subs:
+                if p.lower() in n.lower():
+                    return n
+        return max(subs, key=lambda n: len(groups[n]))
+    return None
 
 def _download_episode(num, iframe, quality, out_dir, seg_workers):
     """Одна серия: m3u8 -> download_hls. Возвращает (pick_quality, size_bytes).
@@ -250,6 +281,7 @@ def grab_anime(anime_id, cfg, franchise_dir=None, dub_override=None, ep_filter=N
         print(f"[!] {title}: озвучек в плеере Kodik не нашлось (есть только Alloha/CVH) - пропуск")
         return info
     # выбор озвучки: явный override (если есть в этом тайтле) -> приоритеты из конфига
+    # (сабы — только если дабов нет, скрыты при allow_subtitles=False или выбраны явно)
     dub = None
     if dub_override:
         for n in groups:
@@ -257,7 +289,12 @@ def grab_anime(anime_id, cfg, franchise_dir=None, dub_override=None, ep_filter=N
                 dub = n
                 break
     if not dub:
-        dub = choose_dubbing(groups, cfg["preferred_dubbings"])
+        dub = choose_dubbing(groups, cfg.get("preferred_dubbings") or [],
+                             allow_subs=cfg.get("allow_subtitles", True),
+                             sub_prefs=cfg.get("preferred_subs"))
+    if not dub:
+        print(f"[!] {title}: подходящих озвучек в плеере Kodik не нашлось (субтитры скрыты) - пропуск")
+        return info
     eps = groups[dub]
     quality = cfg["quality"]
     base = franchise_dir or cfg["output_dir"]
@@ -266,10 +303,12 @@ def grab_anime(anime_id, cfg, franchise_dir=None, dub_override=None, ep_filter=N
     nums = sorted(eps)
     if ep_filter:
         nums = [n for n in nums if ep_filter(n)]
+    sub = is_sub(dub)
+    kind, fname = ("субтитры", "_субтитры.txt") if sub else ("озвучка", "_озвучка.txt")
     print(f"\n=== {title} ===")
-    print(f"    озвучка: {dub}   серий к скачиванию: {len(nums)}   качество: {quality}")
-    with open(os.path.join(out_dir, "_озвучка.txt"), "w", encoding="utf-8") as f:
-        f.write(f"{title}\nОзвучка: {dub}\nИсточник: {SITE}\n")
+    print(f"    {kind}: {dub}   серий к скачиванию: {len(nums)}   качество: {quality}")
+    with open(os.path.join(out_dir, fname), "w", encoding="utf-8") as f:
+        f.write(f"{title}\n{kind.capitalize()}: {dub}\nИсточник: {SITE}\n")
     try:
         workers = max(1, int(cfg.get("workers", 4) or 4))
     except Exception:
@@ -341,10 +380,27 @@ def ask_menu(info, items, cfg):
         print("В плеере Kodik озвучек нет (только Alloha/CVH) — этот тайтл не качается.")
         return None
 
-    # --- 1. озвучка ---
+    # --- 1. озвучка / субтитры ---
+    allow_subs = bool(cfg.get("allow_subtitles", True))
+    if any(is_sub(n) for n in groups):
+        if allow_subs:
+            a = input("В списке есть субтитры. Скрыть их? (y/N): ").strip().lower()
+            allow_subs = a != "y"
+        else:
+            a = input("Субтитры сейчас скрыты. Показать их? (y/N): ").strip().lower()
+            allow_subs = a == "y"
     names = sorted(groups, key=lambda n: -len(groups[n]))
-    default_dub = choose_dubbing(groups, cfg["preferred_dubbings"])
-    print("\nДоступные озвучки:")
+    if not allow_subs:
+        names = [n for n in names if not is_sub(n)]
+    if not names:
+        print("В плеере Kodik озвучек нет (только субтитры, а они скрыты) — этот тайтл не качается.")
+        return None
+    default_dub = choose_dubbing(groups, cfg.get("preferred_dubbings") or [],
+                                 allow_subs=allow_subs,
+                                 sub_prefs=cfg.get("preferred_subs"))
+    if default_dub not in names:
+        default_dub = names[0]
+    print("\nДоступные озвучки и субтитры:")
     for i, n in enumerate(names, 1):
         mark = "  <- по умолчанию" if n == default_dub else ""
         print(f"  {i}. {n}  ({len(groups[n])} сер.){mark}")
@@ -370,11 +426,13 @@ def ask_menu(info, items, cfg):
         a = input(f"\nКачать всю франшизу (ещё {len(other)} тайтл(ов))? (y/N): ").strip().lower()
         allseasons = a == "y"
 
-    print(f"\n>> Итог: озвучка «{dub}», качество {q}, серий {len(keep)}"
+    kind = "субтитры" if is_sub(dub) else "озвучка"
+    print(f"\n>> Итог: {kind} «{dub}», качество {q}, серий {len(keep)}"
           + (", вся франшиза" if allseasons else ""))
     if input("Начать? (Y/n): ").strip().lower() == "n":
         return None
-    return {"dub": dub, "quality": q, "episodes": keep, "all_seasons": allseasons}
+    return {"dub": dub, "quality": q, "episodes": keep, "all_seasons": allseasons,
+            "allow_subs": allow_subs}
 
 
 def grab(url_or_id, cfg=None, interactive=False):
@@ -398,6 +456,7 @@ def grab(url_or_id, cfg=None, interactive=False):
             return
         cfg["quality"] = choice["quality"]
         cfg["all_seasons"] = choice["all_seasons"]
+        cfg["allow_subtitles"] = choice.get("allow_subs", cfg.get("allow_subtitles", True))
         dub_override = choice["dub"]
         keep = choice["episodes"]
         ep_filter = (lambda n: n in keep)
@@ -485,7 +544,11 @@ def tv_enumerate(card_url):
         if not seasons:
             return False
         season = sel if sel in seasons else max(seasons)
-        name = (tr["title"] or "").replace(".Subtitles", " (Субтитры)")
+        raw = (tr["title"] or "")
+        if ".Subtitles" in raw:
+            name = SUB_PREFIX + raw.replace(".Subtitles", "").strip()
+        else:
+            name = raw
         enum["dubs"][name] = {
             "tid": tr["tid"], "season": season, "eps": seasons[season],
             "sig": tva.parse_sig(html), "ref": ref}
@@ -541,7 +604,12 @@ def tv_grab_anime(card_url, cfg, dub_override=None, ep_filter=None, enum=None):
                 dub = n
                 break
     if not dub:
-        dub = choose_dubbing(groups, cfg["preferred_dubbings"])
+        dub = choose_dubbing(groups, cfg.get("preferred_dubbings") or [],
+                             allow_subs=cfg.get("allow_subtitles", True),
+                             sub_prefs=cfg.get("preferred_subs"))
+    if not dub:
+        print(f"[!] {title}: подходящих озвучек в плеере Kodik не нашлось (субтитры скрыты) - пропуск")
+        return enum
     di = dubs[dub]
     if di.get("single"):
         eps = {1: di["single"]}
@@ -555,11 +623,13 @@ def tv_grab_anime(card_url, cfg, dub_override=None, ep_filter=None, enum=None):
     if ep_filter:
         nums = [n for n in nums if ep_filter(n)]
     extra = "" if di.get("single") else f"   сезон: {di.get('season')}"
+    sub = is_sub(dub)
+    kind, fname = ("субтитры", "_субтитры.txt") if sub else ("озвучка", "_озвучка.txt")
     print(f"\n=== {title} ===")
-    print(f"    озвучка: {dub}   серий к скачиванию: {len(nums)}   качество: {quality}")
+    print(f"    {kind}: {dub}   серий к скачиванию: {len(nums)}   качество: {quality}")
     print(f"    плеер: {enum.get('slot')}{extra}")
-    with open(os.path.join(out_dir, "_озвучка.txt"), "w", encoding="utf-8") as f:
-        f.write(f"{title}\nОзвучка: {dub}\nПлеер: {enum.get('slot')} (yummyanime.tv)\n"
+    with open(os.path.join(out_dir, fname), "w", encoding="utf-8") as f:
+        f.write(f"{title}\n{kind.capitalize()}: {dub}\nПлеер: {enum.get('slot')} (yummyanime.tv)\n"
                 f"Источник: {enum.get('card_url')}\n")
     try:
         workers = max(1, int(cfg.get("workers", 4) or 4))
@@ -618,10 +688,27 @@ def tv_ask_menu(enum, cfg):
         return None
     groups = {n: ({1: None} if d.get("single") else d.get("eps", {}))
               for n, d in dubs.items()}
+    allow_subs = bool(cfg.get("allow_subtitles", True))
+    if any(is_sub(n) for n in groups):
+        if allow_subs:
+            a = input("В списке есть субтитры. Скрыть их? (y/N): ").strip().lower()
+            allow_subs = a != "y"
+        else:
+            a = input("Субтитры сейчас скрыты. Показать их? (y/N): ").strip().lower()
+            allow_subs = a == "y"
     names = sorted(groups, key=lambda n: -len(groups[n]))
-    default_dub = choose_dubbing(groups, cfg["preferred_dubbings"])
+    if not allow_subs:
+        names = [n for n in names if not is_sub(n)]
+    if not names:
+        print("В плеере Kodik озвучек нет (только субтитры, а они скрыты) — этот тайтл не качается.")
+        return None
+    default_dub = choose_dubbing(groups, cfg.get("preferred_dubbings") or [],
+                                 allow_subs=allow_subs,
+                                 sub_prefs=cfg.get("preferred_subs"))
+    if default_dub not in names:
+        default_dub = names[0]
     print(f"\n========== {enum.get('title', '?')} (.tv, плеер {enum.get('slot')}) ==========")
-    print("\nДоступные озвучки:")
+    print("\nДоступные озвучки и субтитры:")
     for i, n in enumerate(names, 1):
         mark = "  <- по умолчанию" if n == default_dub else ""
         print(f"  {i}. {n}  ({len(groups[n])} сер.){mark}")
@@ -634,10 +721,11 @@ def tv_ask_menu(enum, cfg):
     print(f"\nСерии в этой озвучке: {eps_avail[0]}–{eps_avail[-1]} (всего {len(eps_avail)})")
     rng = input("Какие качать? (Enter = все, или напр. 5-12 / 3,7,9): ").strip()
     keep = parse_ep_range(rng, eps_avail)
-    print(f"\n>> Итог: озвучка «{dub}», качество {q}, серий {len(keep)}")
+    kind = "субтитры" if is_sub(dub) else "озвучка"
+    print(f"\n>> Итог: {kind} «{dub}», качество {q}, серий {len(keep)}")
     if input("Начать? (Y/n): ").strip().lower() == "n":
         return None
-    return {"dub": dub, "quality": q, "episodes": keep}
+    return {"dub": dub, "quality": q, "episodes": keep, "allow_subs": allow_subs}
 
 
 def tv_grab(card_url, cfg=None, interactive=False):
@@ -651,6 +739,7 @@ def tv_grab(card_url, cfg=None, interactive=False):
             print("Отменено.")
             return
         cfg["quality"] = choice["quality"]
+        cfg["allow_subtitles"] = choice.get("allow_subs", cfg.get("allow_subtitles", True))
         dub_override = choice["dub"]
         keep = choice["episodes"]
         ep_filter = (lambda n: n in keep)
@@ -678,6 +767,12 @@ if __name__ == "__main__":
     workers, args = _pop_int_flag(args, "--workers")
     segs, args = _pop_int_flag(args, "--segs", "--seg-workers")
     run_cfg = dict(CFG)
+    if "--no-subs" in args:
+        run_cfg["allow_subtitles"] = False
+        args = [a for a in args if a != "--no-subs"]
+    if "--subs" in args:
+        run_cfg["allow_subtitles"] = True
+        args = [a for a in args if a != "--subs"]
     if workers:
         run_cfg["workers"] = max(1, min(workers, 8))
     if segs is not None:

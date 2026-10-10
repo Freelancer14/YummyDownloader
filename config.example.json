@@ -1,5 +1,7 @@
 {
   "preferred_dubbings": ["AniLibria", "AniStar", "Dream Cast", "AnimeVost", "AniDUB"],
+  "allow_subtitles": true,
+  "preferred_subs": ["Crunchyroll"],
   "quality": "max",
   "all_seasons": false,
   "only_kodik": true,

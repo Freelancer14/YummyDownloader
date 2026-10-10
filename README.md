@@ -1,6 +1,6 @@
 # YummyDownloader — форк (GUI + параллельная качка + yummyanime.tv)
 
-![version](https://img.shields.io/badge/version-1.0.4-blue) `VERSION: 1.0.4` · см. [CHANGELOG.md](CHANGELOG.md)
+![version](https://img.shields.io/badge/version-1.0.5-blue) `VERSION: 1.0.5` · см. [CHANGELOG.md](CHANGELOG.md)
 
 > **English summary:** Fork of [foxycuter2-ai/YummyDownloader](https://github.com/foxycuter2-ai/YummyDownloader) with a tkinter GUI, parallel episode/segment downloads, and `yummyanime.tv` support via the same Kodik pipeline. Quality stays `max untouched` (no re-encoding).
 

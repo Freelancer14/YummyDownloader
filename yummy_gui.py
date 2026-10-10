@@ -555,6 +555,53 @@ def install_deps_worker(q):
         pass
 
 
+# ------------------------------------------------------- subtitles (GUI side)
+# Сабы ядро маркирует префиксом '[саб] ' (kodik_groups). Когда параллельный
+# fixer добавит yummy_dl.is_sub(), используем его; пока — fallback на префикс.
+# Чистые функции без окна — их дергает и интерфейс, и headless-симуляция.
+SUB_PREFIX = "[саб] "
+
+def is_sub_name(name):
+    """True, если группа — субтитры, а не озвучка."""
+    try:
+        fn = getattr(yummy_dl, "is_sub", None)
+        if callable(fn):
+            return bool(fn(name))
+    except Exception:
+        pass
+    return (name or "").startswith(SUB_PREFIX)
+
+def split_dubs_subs(names):
+    """Поделить список групп: (дабы, сабы), порядок внутри сохраняется."""
+    dubs = [n for n in names if not is_sub_name(n)]
+    subs = [n for n in names if is_sub_name(n)]
+    return dubs, subs
+
+def dub_menu_label(name, count):
+    """Подпись пункта выпадашки: сабы с суффиксом '[суб]'."""
+    base = "%s (%d сер.)" % (name, count)
+    return base + " [суб]" if is_sub_name(name) else base
+
+def visible_dub_names(names, show_subs):
+    """Видимые пункты при состоянии чекбокса 'Показывать субтитры'."""
+    dubs, subs = split_dubs_subs(names)
+    return dubs + subs if show_subs else dubs
+
+def default_visible_dub(groups, prefs, show_subs):
+    """Дефолтный выбор среди видимых (сабы скрыты — только дабы)."""
+    names = [n for n in groups if show_subs or not is_sub_name(n)]
+    if not names:
+        names = list(groups)
+    sub = {n: groups[n] for n in names}
+    return yummy_dl.choose_dubbing(sub, prefs)
+
+def dub_file_info(name):
+    """(имя файла, подпись) для записи результата выбора в папку тайтла."""
+    if is_sub_name(name):
+        return "_субтитры.txt", "Субтитры"
+    return "_озвучка.txt", "Озвучка"
+
+
 # ------------------------------------------------------- background workers
 # Работают в отдельном потоке, с окном общаются только через очередь событий.
 
@@ -692,9 +739,10 @@ def download_worker(tasks, cfg, q, stop_flag):
                 out_dir = os.path.join(base, title)
                 try:
                     os.makedirs(out_dir, exist_ok=True)
-                    with open(os.path.join(out_dir, "_озвучка.txt"), "w", encoding="utf-8") as f:
-                        f.write("%s\nОзвучка: %s\nПлеер: %s (yummyanime.tv)\nИсточник: %s\n" % (
-                            title, dub, enum.get("slot"), enum.get("card_url")))
+                    fname, word = dub_file_info(dub)
+                    with open(os.path.join(out_dir, fname), "w", encoding="utf-8") as f:
+                        f.write("%s\n%s: %s\nПлеер: %s (yummyanime.tv)\nИсточник: %s\n" % (
+                            title, word, dub, enum.get("slot"), enum.get("card_url")))
                 except Exception as e:
                     q.put(("title_error", {"hint": title, "error": "нет доступа к папке: %s" % e}))
                     continue
@@ -721,8 +769,9 @@ def download_worker(tasks, cfg, q, stop_flag):
                 out_dir = os.path.join(base, title)
                 try:
                     os.makedirs(out_dir, exist_ok=True)
-                    with open(os.path.join(out_dir, "_озвучка.txt"), "w", encoding="utf-8") as f:
-                        f.write("%s\nОзвучка: %s\nИсточник: %s\n" % (title, dub, yummy_dl.SITE))
+                    fname, word = dub_file_info(dub)
+                    with open(os.path.join(out_dir, fname), "w", encoding="utf-8") as f:
+                        f.write("%s\n%s: %s\nИсточник: %s\n" % (title, word, dub, yummy_dl.SITE))
                 except Exception as e:
                     q.put(("title_error", {"hint": title, "error": "нет доступа к папке: %s" % e}))
                     continue
@@ -818,11 +867,16 @@ class App:
             anchor="w", padx=8, pady=(6, 2))
         row = ttk.Frame(f2)
         row.pack(fill="x", padx=8, pady=2)
-        ttk.Label(row, text="Озвучка:").pack(side="left")
+        ttk.Label(row, text="Озвучка / субтитры:").pack(side="left")
         self.dub_var = tk.StringVar(value="—")
         self.dub_menu = ttk.OptionMenu(row, self.dub_var, "—")
         self.dub_menu.pack(side="left", fill="x", expand=True, padx=6)
         self.dub_var.trace_add("write", lambda *a: self.refresh_summary())
+        self.show_subs_var = tk.BooleanVar(value=True)
+        self.subs_check = ttk.Checkbutton(f2, text="Показывать субтитры",
+                                          variable=self.show_subs_var,
+                                          command=self.on_toggle_subs)
+        self.subs_check.pack(anchor="w", padx=8, pady=2)
         row2 = ttk.Frame(f2)
         row2.pack(fill="x", padx=8, pady=2)
         ttk.Label(row2, text="Качество:").pack(side="left")
@@ -1051,7 +1105,7 @@ class App:
     def _settings_enabled(self, on):
         s = "normal" if on else "disabled"
         for w in (self.dub_menu, self.eps_entry, self.fran_check,
-                  self.workers_spin):
+                  self.workers_spin, self.subs_check):
             try:
                 w.configure(state=s)
             except Exception:
@@ -1193,6 +1247,67 @@ class App:
         t = threading.Thread(target=install_deps_worker, args=(self.q,),
                              daemon=True)
         t.start()
+
+    def on_toggle_subs(self):
+        """Чекбокс 'Показывать субтитры': перестроить список.
+        Если сабы скрыли, а выбран был саб — сброс на дефолтный даб."""
+        if not self.data or not self.data.get("groups"):
+            return
+        show = bool(self.show_subs_var.get())
+        cur = self.dub_var.get()
+        select = cur
+        if not show and is_sub_name(cur):
+            try:
+                dubs_only = {n: g for n, g in self.data["groups"].items()
+                             if not is_sub_name(n)}
+                if dubs_only:
+                    select = yummy_dl.choose_dubbing(
+                        dubs_only, self.cfg.get("preferred_dubbings", []))
+            except Exception:
+                pass
+        self._rebuild_dub_menu(select=select)
+        self.refresh_summary()
+
+    def _rebuild_dub_menu(self, select=None):
+        """Перестроить выпадашку: дабы сверху, сабы снизу (с '[суб]'
+        и разделителем). select — что выбрать, если оно видимо."""
+        if not self.data or not self.data.get("groups"):
+            return
+        groups = self.data["groups"]
+        show = bool(self.show_subs_var.get())
+        names = sorted(groups, key=lambda n: -len(groups[n]))
+        dubs, subs = split_dubs_subs(names)
+        visible = dubs + subs if show else dubs
+        if not visible:
+            visible = names  # все скрыты быть не могут — показать всё
+            dubs, subs = split_dubs_subs(visible)
+        menu = self.dub_menu["menu"]
+        menu.delete(0, "end")
+        for n in dubs:
+            menu.add_command(label=dub_menu_label(n, len(groups[n])),
+                             command=lambda v=n: self.dub_var.set(v))
+        if show and subs:
+            try:
+                menu.add_separator()
+            except Exception:
+                pass
+            for n in subs:
+                menu.add_command(label=dub_menu_label(n, len(groups[n])),
+                                 command=lambda v=n: self.dub_var.set(v))
+        want = select if select in visible else None
+        if want is None:
+            cur = self.dub_var.get()
+            if cur in visible:
+                want = cur
+            elif self.data.get("default_dub") in visible:
+                want = self.data["default_dub"]
+            else:
+                try:
+                    want = default_visible_dub(
+                        groups, self.cfg.get("preferred_dubbings", []), show)
+                except Exception:
+                    want = visible[0]
+        self.dub_var.set(want)
 
     def refresh_summary(self):
         if not self.data or self.state in ("downloading", "checking"):
@@ -1353,13 +1468,7 @@ class App:
             self.data = p
             self.checked_url = self.url_var.get().strip()
             self.title_var.set(p["title"])
-            menu = self.dub_menu["menu"]
-            menu.delete(0, "end")
-            for n in p["names"]:
-                label = "%s (%d сер.)" % (n, len(p["groups"][n]))
-                menu.add_command(label=label,
-                                 command=lambda v=n: self.dub_var.set(v))
-            self.dub_var.set(p["default_dub"])
+            self._rebuild_dub_menu(select=p.get("default_dub"))
             if p["franchise_count"]:
                 self.fran_check.configure(
                     state="normal",
