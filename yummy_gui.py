@@ -399,7 +399,7 @@ def gui_download_hls(m3u8_url, out_path, emit=None, stop_flag=None, attempts=3,
             pass
         send(None)
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, bufsize=1)
+                                stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", bufsize=1)
         try:
             for line in proc.stdout:
                 parsed = parse_progress_value(line)
@@ -544,7 +544,7 @@ def run_pip_install(runner=None):
     run = runner or subprocess.run
     try:
         r = run(pip_install_cmd(), stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True, timeout=600)
+                stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", timeout=600)
     except Exception as e:
         return False, "ошибка: %s" % e
     rc = getattr(r, "returncode", 1)

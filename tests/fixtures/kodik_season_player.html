@@ -1,0 +1,361 @@
+  <!--
+  Чтобы получить доступ к базе фильмов с данным плеером, пишите на почту: support@kodikres.com
+  -->
+<!doctype html>
+<html>
+<head>
+  <title>Kodik Player</title>
+  <link href="/assets/images/favicon.png" rel="shortcut icon">
+  <meta charset="utf-8">
+  <meta content="width=device-width, initial-scale=1" name="viewport" >
+  <script type="text/javascript">
+    var type = "seria";
+    var videoId = "1478013";
+    var urlParams = '{"d":"old.yummyani.me","d_sign":"6244e92ea4b43102bb6d4f9aea92dd873685814637b16bec3dd2399e1affc6b3:2610200530","pd":"kodikplayer.com","pd_sign":"ee06e3f43631bd36fde7dcdc261888b59797a27e89e2b3a5e8b1ec041c23c98c:2610200530","ref":"https%3A%2F%2Fold.yummyani.me%2Fcatalog%2Fitem%2Fmag-vody","ref_sign":"c90cd6bca2fa0780fe62b0b3b82631c347eedc748972b91967412597e9c6735c:2610200530","translations":false,"advert_debug":true,"first_url":false}';
+    var autoResume = false;
+    var fullscreenLockOrientation = true;
+    var assetHost = '';
+
+    var translationId = null;
+    var translationTitle = null;
+    var cdnCheckLink = "https://cloud.solodcdn.com/test/c70cf82e55642650e6d1652bd35f677e:2026101700/g";
+  </script>
+
+  <link rel="stylesheet"  href="/assets/css/app.player.fdde01c2ebdd5cd677e6ba8f4748a8893666154f57417ecb3c18df03e374fb6a.css" />
+  <script type="text/javascript"  src="/assets/js/app.player_single.9abf69e8fcd08ec00343f70a42b529a07f728312fe4d74d23d8932a7b288d67f.js"></script>
+</head>
+<body class=" ">
+  <div class="main-box">
+    <style>
+  .resume-button { color: rgba(255, 255, 255, 0.75); }
+  .resume-button:hover { background-color: #171717; }
+  .resume-button { border-radius: 6px; }
+  .active-player .resume-button { border-radius: 6px; }
+
+
+  .resume-button {
+    background-color: rgba(23, 23, 23, 0.8);
+  }
+
+
+
+  .resume-info {
+    bottom: 50px;
+    padding: 5px 10px;
+    background-color: rgba(23, 23, 23, 0.9);
+    border-radius: 6px;
+  }
+
+  .resume-button:hover .resume-info { bottom: 40px; }
+
+  .resume-info::after {
+    position: absolute;
+    content: "";
+    width: 0;
+    height: 0;
+    display: block;
+    border-left: 7px solid transparent;
+    border-right: 7px solid transparent;
+    border-top: 7px solid rgba(23, 23, 23, 0.9);
+    bottom: -7px;
+    left: calc(50% - 7px);
+  }
+
+</style>
+
+<style>
+  .movie-panel, .movie-translations-box select { color: #fff; }
+
+  .movie-translations-box .select-button, .movie-translations-box select, .movie-translations-box.mobile:hover select,
+  .movie-translations-box.mobile:hover .select-button { background-color: #171717; }
+  .movie-translations-box .select-button svg .fill { fill: #fff; }
+
+  .movie-translations-box:hover select, .movie-translations-box:hover .select-button,
+  .movie-translations-box.active select, .movie-translations-box.active .select-button,
+  .movie-translations-box .dropdown-content .item, .movie-translations-box.mobile:active select,
+  .movie-translations-box.mobile:active .select-button { background-color: #242424; }
+
+  .movie-translations-box .dropdown-content .item:hover { background-color: #303030; }
+  .mobile .movie-translations-box .dropdown-content .item:hover { background-color: #242424; }
+  .mobile .movie-translations-box .dropdown-content .item:active { background-color: #303030; }
+
+  .movie-translations-box .dropdown-content .item.selected { color: rgba(255, 255, 255, 0.5); }
+  .movie-translations-box .dropdown-content .item.selected:hover,
+  .movie-translations-box .dropdown-content .item.selected:active, .movie-translations-box .search-block { background-color: #242424; }
+
+  .movie-panel .dropdown-content::-webkit-scrollbar { background-color: #292929 }
+  .movie-panel .dropdown-content::-webkit-scrollbar-thumb { background-color: #424242 }
+  .movie-panel .dropdown-content::-webkit-scrollbar-thumb:hover { background-color: #969696 }
+
+  .select-button .subtitle-icon, .dropdown-content .subtitle-icon { background-color: #4a4a4a }
+
+  .movie-translations-box .dropdown { border-radius: 0 0 6px 6px; }
+  .movie-translations-box .select-button, .movie-translations-box select { border-radius: 6px; }
+  .movie-translations-box.active .select-button, .movie-translations-box.active select { border-radius: 6px 6px 0 0; }
+
+  .active-player .movie-panel, .active-player .movie-translations-box select { color: #fff; }
+
+  .active-player .movie-translations-box .select-button, .active-player .movie-translations-box select,
+  .active-player .movie-translations-box.mobile:hover select,
+  .active-player .movie-translations-box.mobile:hover .select-button { background-color: #1b1b1b; }
+  .active-player .movie-translations-box .select-button svg .fill { fill: #fff; }
+
+  .active-player .movie-translations-box:hover select, .active-player .movie-translations-box:hover .select-button,
+  .active-player .movie-translations-box.active select, .active-player .movie-translations-box.active .select-button,
+  .active-player .movie-translations-box .dropdown-content .item, .active-player .movie-translations-box.mobile:active select,
+  .active-player .movie-translations-box.mobile:active .select-button { background-color: #282828; }
+
+  .active-player .movie-translations-box .dropdown-content .item:hover { background-color: #343434; }
+  .active-player.mobile .movie-translations-box .dropdown-content .item:hover { background-color: #282828; }
+  .active-player.mobile .movie-translations-box .dropdown-content .item:active { background-color: #343434; }
+
+  .active-player .movie-translations-box .dropdown-content .item.selected { color: rgba(255, 255, 255, 0.5); }
+  .active-player .movie-translations-box .dropdown-content .item.selected:hover,
+  .active-player .movie-translations-box .dropdown-content .item.selected:active { background-color: #282828; }
+
+  .active-player .select-button .subtitle-icon, .active-player .dropdown-content .subtitle-icon { background-color: #4e4e4e }
+
+  .active-player .movie-translations-box .dropdown { border-radius: 0 0 6px 6px; }
+  .active-player .movie-translations-box .select-button, .movie-translations-box select { border-radius: 6px; }
+  .active-player .movie-translations-box.active .select-button, .movie-translations-box.active select { border-radius: 6px 6px 0 0; }
+</style>
+
+      <!-- RU | XX -->
+
+<style>
+  .player_box { background-color: #000; }
+  .play_button { width: 74px; height: 74px; }
+  .play_button svg .fill { fill: #ff6666; }
+  .play_button svg .stroke { stroke: #ff6666; }
+  .play_button:hover svg .fill { fill: #000000; }
+  .play_button:hover svg .stroke { stroke: #000000; }
+
+
+    .play_loading svg .bg { fill: rgba(255, 255, 255, .25); }
+    .play_loading svg .animated { fill: #fff; }
+
+  .share_button .fill { fill: #fff; }
+  .share_button {
+    background-color: #171717;
+    border-radius: 6px;
+  }
+  .share_button:after, .share_button:hover { background-color: #242424; }
+  .share_button:after {
+    color: #fff;
+    border-radius: 6px;
+  }
+
+  .fp-controls, .fp-timeline-wrapper, .fp-play-icon, .fp-pause-icon, .fp-x-fullscreen { background-color: #1b1b1b; }
+  .fp-play-icon .fp-fill, .fp-pause-icon  .fp-fill, .fp-x-fullscreen .fp-fill,
+  .fp-quality svg, .fp-volume-icon svg .fp-fill, .fp-playback-settings .fp-fill, .fp-subtitles span svg, .fp-subtitles-dropdown .button svg,
+  .fp-subtitles-dropdown .settings-content svg .fill, .ps-dropdown .fp-fill, .fp-chromecast.fp-icon .fill, .fp-airplay.fp-icon .fill { fill: #fff }
+  .ps-dropdown .rangeslider__handle, .ps-dropdown .rangeslider__fill { background-color: #fff; }
+  .fp-progress, .fp-volumeslider em.fp-color, .fp-quality.hd span:before, .fp-subtitles.chosen::after, .fp-playback-settings.changed::before { background-color: #ff6666; }
+  .fp-play-icon:hover, .fp-pause-icon:hover { background-color: #ff6666; }
+  .fp-timeline { background-color: #2d2d2d; }
+  .fp-x-buffer { background-color: #676767; }
+  .fp-volumeslider em { background-color: rgba(255, 102, 102, 0.4); }
+  .fp-elapsed, .fp-duration, .fp-quality, .fp-quality.hd span:before, .fp-subtitles { color: #fff; }
+  .not-mobile .fp-x-fullscreen:hover, .mobile .fp-x-fullscreen:active, .fp-quality-dropdown div, .fp-subtitles-dropdown > div,
+  .active-quality-dropdown .fp-quality, .active-subtitles-dropdown .fp-subtitles, .fp-quality:hover, .fp-playback-settings:hover, .active-ps-dropdown .fp-playback-settings, .fp-quality-dropdown div.current:hover, .fp-subtitles:hover, .fp-subtitles-dropdown .items div.current:hover, .player-tooltip, .ps-dropdown, .ps-dropdown .option.current:hover { background-color: #282828; }
+  .fp-quality-dropdown div.blocked,  .fp-quality-dropdown div.blocked:hover { background-color: #131313; }
+  .fp-quality-dropdown div.current, .fp-quality-dropdown div.blocked, .fp-subtitles-dropdown .items div.current, .ps-dropdown .option.current { color: rgba(255, 255, 255, 0.5); }
+  .fp-quality-dropdown div:hover, .fp-subtitles-dropdown .items div:hover, .fp-subtitles-dropdown .settings-header:hover,
+  .fp-subtitles-dropdown .settings-header.shown, .ps-dropdown .options:hover, .ps-dropdown .option:hover, .ps-dropdown .slider-button .title:hover, .ps-dropdown .top-title .custom:hover { background-color: #343434; }
+  .fp-quality-dropdown div.hd:after { color: #ff6666; }
+  .fp-quality-dropdown, .fp-quality-dropdown div:first-child { border-radius: 6px 6px 0 0; }
+  .player-tooltip { color: rgba(255, 255, 255, 0.8); }
+  .ps-dropdown { color: rgba(255, 255, 255, 0.9); }
+  .ps-dropdown .top-title { border-color: rgba(255, 255, 255, 0.15); }
+  .ps-dropdown .rangeslider--horizontal { background-color: rgba(255, 255, 255, 0.15); }
+  .ps-dropdown, .ps-dropdown > div > div:first-child { border-radius: 6px 6px 0 0; }
+  .ps-dropdown .slider .info .value { border: 1px dashed rgba(255, 255, 255, 0.3); }
+  .ps-dropdown .slider .info .confirm { border: 1px solid rgba(255, 255, 255, 0.2); }
+  .ps-dropdown .slider .info .confirm:hover { background-color: rgba(255, 255, 255, 0.2); }
+
+  .ps-dropdown > div::-webkit-scrollbar { background-color: #2d2d2d }
+  .ps-dropdown > div::-webkit-scrollbar-thumb { background-color: #464646 }
+  .ps-dropdown > div::-webkit-scrollbar-thumb:hover { background-color: #9a9a9a }
+
+  .fp-subtitles-dropdown .subtitles-settings .header { border-bottom-color: #343434; }
+
+  .fp-share_button .fill { fill: #fff; }
+  .fp-share_button {
+    background-color: #1b1b1b;
+    border-radius: 6px;
+  }
+  .fp-share_button:after, .fp-share_button:hover { background-color: #282828; }
+  .fp-share_button:after {
+    color: #fff;
+    border-radius: 6px;
+  }
+
+  .fp-controls { border-radius: 6px 0 0 6px; }
+  .fp-x-fullscreen { border-radius: 0 6px 6px 0; }
+  .fp-play-icon, .fp-pause-icon { border-radius: 6px; }
+</style>
+
+
+
+<script src="/adsbygoogle.js"></script>
+
+<script>
+  
+  var advertDebug = true;
+  
+
+  var domain = "old.yummyani.me";
+  var d_sign = "6244e92ea4b43102bb6d4f9aea92dd873685814637b16bec3dd2399e1affc6b3:2610200530";
+  var pd = "kodikplayer.com";
+  var pd_sign = "ee06e3f43631bd36fde7dcdc261888b59797a27e89e2b3a5e8b1ec041c23c98c:2610200530";
+  var ref = "https://old.yummyani.me/catalog/item/mag-vody";
+  var ref_sign = "c90cd6bca2fa0780fe62b0b3b82631c347eedc748972b91967412597e9c6735c:2610200530";
+  var user_ip = "185.234.230.107";
+  var advertScript = null;
+  var mediaGenre = "anime";
+  var translationId = 3861;
+  var translationTitle = "AniLiberty";
+  var country = "RU";
+
+  var customization = true;
+  var rate = false;
+
+  var share_button = "<div class=\"share_button\"><svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 57.884 57.884' width='16' height='16'><path d='M46 37c-3 0-5.8 1.3-7.7 3.4l-16.6-8c.4-1 .6-2.2.6-3.5 0-1.3-.2-2.5-.6-3.6l16.6-8c2 2 4.6 3.5 7.7 3.5 5.7 0 10.4-4.8 10.4-10.6C56.4 4.7 51.7 0 46 0c-5.8 0-10.5 4.7-10.5 10.4 0 .6 0 1 .2 1.6L18 20.5c-1.7-1.2-3.8-2-6-2C6 18.5 1.4 23.2 1.4 29S6 39.3 12 39.3c2.2 0 4.3-.8 6-2l17.7 8.4-.2 1.7C35.5 53.2 40.2 58 46 58c5.7 0 10.4-4.8 10.4-10.5C56.4 41.7 51.7 37 46 37z' class='fill'/></svg></div>";
+
+  var share_copy_links = true;
+
+
+  var a_detect = false;
+  var adult = false;
+  var eng_color = "blue";
+  var auto_switch_episode = false;
+  var fullscreenLockOrientation = true
+
+  var minAge = {
+    enabled: false,
+    age: 0
+  };
+</script>
+
+
+
+<script>
+    var playerLink = ["/assets/js/app.player.abed291a63d4f2a5592905082f598e7e63e7847b1d130772ebb1e04a09326c8d.js"];
+
+  playerSettings.block_c = { manifest: false, other: false };
+
+  playerSettings.p2p_trackers = ["wss://wt2.kodik.biz:8434"];
+  playerSettings.forceAdvertCount = true;
+  playerSettings.country = "RU";
+
+  var parsedStartFrom = {};
+  playerSettings.startfrom = parsedStartFrom.startfrom;
+  playerSettings.skip = parsedStartFrom.skipObject;
+
+
+
+  playerSettings.onlyAdvert = false;
+
+
+  var vInfo = {};
+  
+   vInfo.type = 'seria'; 
+   vInfo.hash = '8019bbcdcf0da3cb00d4ab0e90ad6eb5'; 
+   vInfo.id = '1478013'; 
+  
+  
+</script>
+
+  <div class="share_button"><svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 57.884 57.884' width='16' height='16'><path d='M46 37c-3 0-5.8 1.3-7.7 3.4l-16.6-8c.4-1 .6-2.2.6-3.5 0-1.3-.2-2.5-.6-3.6l16.6-8c2 2 4.6 3.5 7.7 3.5 5.7 0 10.4-4.8 10.4-10.6C56.4 4.7 51.7 0 46 0c-5.8 0-10.5 4.7-10.5 10.4 0 .6 0 1 .2 1.6L18 20.5c-1.7-1.2-3.8-2-6-2C6 18.5 1.4 23.2 1.4 29S6 39.3 12 39.3c2.2 0 4.3-.8 6-2l17.7 8.4-.2 1.7C35.5 53.2 40.2 58 46 58c5.7 0 10.4-4.8 10.4-10.5C56.4 41.7 51.7 37 46 37z' class='fill'/></svg></div>
+
+<div class="preview-icons">
+
+</div>
+
+
+<div class="player_box">
+  <div id='get_code_window'>
+    <input id="for-copy" />
+    <div class='close_get_code_window'>
+      <svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 212.982 212.982' width='100%' height='100%'><path d='M131.8 106.5l76-76c7-7 7-18.3 0-25.3s-18.4-7-25.4 0l-76 76-75.8-76c-7-7-18.4-7-25.4 0s-7 18.4 0 25.4l76 76-76 75.8c-7 7-7 18.3 0 25.3s18.4 7 25.4 0l76-76 75.8 76c7 7 18.3 7 25.3 0s7-18.3 0-25.3l-76-76z' fill='#FFF' fill-rule='evenodd' clip-rule='evenodd'/></svg>
+    </div>
+    <div class='get_code_main'>
+      <div class='get_code_paddings'>
+        <table>
+            <tr class="get_code_1">
+              <td style='width: 80px;'></td>
+              <td class='get_code_heading'>Получить код</td>
+              <td style='width: 113px;'></td>
+            </tr>
+            <tr class="get_code_1">
+              <td class='get_code_left_info'>Код</td>
+              <td><input value='&lt;iframe src=&quot;https://kodikplayer.com/seria/1478013/8019bbcdcf0da3cb00d4ab0e90ad6eb5/720p&quot; width=&quot;607&quot; height=&quot;360&quot; frameborder=&quot;0&quot; AllowFullScreen allow=&quot;autoplay *; fullscreen *&quot;&gt;&lt;/iframe&gt;' readonly class='get_code_copy_input'/></td>
+              <td><div class='get_code_copy' data-code='&lt;iframe src=&quot;https://kodikplayer.com/seria/1478013/8019bbcdcf0da3cb00d4ab0e90ad6eb5/720p&quot; width=&quot;607&quot; height=&quot;360&quot; frameborder=&quot;0&quot; AllowFullScreen allow=&quot;autoplay *; fullscreen *&quot;&gt;&lt;/iframe&gt;'>копировать</div></td>
+            </tr>
+            <tr class="get_code_1">
+              <td class='get_code_left_info'>Ссылка</td>
+              <td><input value='https://kodikplayer.com/seria/1478013/8019bbcdcf0da3cb00d4ab0e90ad6eb5/720p' readonly class='get_code_copy_input'/></td>
+              <td><div class='get_code_copy' data-code='https://kodikplayer.com/seria/1478013/8019bbcdcf0da3cb00d4ab0e90ad6eb5/720p'>копировать</div></td>
+            </tr>
+          <tr>
+            <td></td>
+            <td class='get_code_heading' colspan="2">Получить доступ к базе</td>
+          </tr>
+          <tr>
+            <td></td>
+            <td class='get_code_info' colspan="2">Подключение к базе бесплатное. Если хотите получить доступ к нашей постоянно обновляющейся базе с множеством фильмов и сериалов, напишите письмо на <span>support@kodikres.com</span>, в котором укажите ваш сайт.</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="play_background">
+  <a class="play_button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 146.39 168.1" class="triangle"><path class="fill" d="M0 55a57.6 57.6 0 0149.68-28.57l-22.57-13A74.21 74.21 0 000 29.07zM107.4 84.05a57.42 57.42 0 01-7.68 28.73l22.57-13a73.72 73.72 0 000-31.39l-22.57-13a57.4 57.4 0 017.68 28.66zM49.68 141.67A57.6 57.6 0 010 113.06v26a74.21 74.21 0 0027.11 15.64z"/><path class="fill" d="M91.72 50.7L57.6 31a54.42 54.42 0 00-7.82-.57A53.69 53.69 0 000 64.15V104a53.69 53.69 0 0049.78 33.72 53 53 0 007.82-.58l34.12-19.7a53.44 53.44 0 000-66.69zM144.85 81.38L126.87 71a77.27 77.27 0 010 26.1l18-10.38a3.08 3.08 0 00-.02-5.34zM0 144.36V165a3.09 3.09 0 004.63 2.67l17.88-10.33A78 78 0 010 144.36zM22.51 10.74L4.63.42A3.08 3.08 0 000 3.09v20.64a78.19 78.19 0 0122.51-12.99z"/></svg></a>
+</div>
+
+<script>
+  $(function () {
+    if (!isIframe() && location.hostname !== "localhost" && location.hostname !== "bs-local.com") {
+      $(".player_box, .share_button, .play_background, .serial-panel, .movie-panel").hide();
+      $("body").append('<div style="height: 100%;" class="promo-error"><table><tr><td><div class="promo-error-box"><div class="message">Извините, но данной страницы не существует</div></div></td></tr></table></div>');
+    }
+  });
+
+
+      var thumbnails = ["//cloud.solodcdn.com/c6974f3edf11773c843ce1f70a6b4278:2026101905/useruploads/117b1b01-0336-45dd-b132-de2dac729843/thumb001.jpg", "//cloud.solodcdn.com/ae99caadca5d1e60e789ff8211bd2e2a:2026101905/useruploads/117b1b01-0336-45dd-b132-de2dac729843/thumb003.jpg", "//cloud.solodcdn.com/62e322525f5325b172861270c5e36864:2026101905/useruploads/117b1b01-0336-45dd-b132-de2dac729843/thumb004.jpg", "//cloud.solodcdn.com/1b78cd50c93e572867c701175a8d710c:2026101905/useruploads/117b1b01-0336-45dd-b132-de2dac729843/thumb002.jpg", "//cloud.solodcdn.com/1348c27824ae659b43180b6bc30c125f:2026101905/useruploads/117b1b01-0336-45dd-b132-de2dac729843/thumb005.jpg"];
+      if (thumbnails) var playerThumbnails = new PlayerThumbnails(thumbnails, 3000);
+</script>
+<p></p>
+
+    
+
+
+    <div class="movie-panel" >
+    </div>
+
+    <script>
+  var yaParams = {};
+
+  if (typeof isIframe === "function") yaParams.iframe = isIframe();
+  
+  yaParams.a = true;
+  yaParams.adult = false;
+  yaParams.double_a = false;
+  yaParams.partnership = true;
+  yaParams.share_link = false;
+  yaParams.c_a = "without_ru";
+  yaParams.c_a_bool = false;
+  yaParams.b_a = "only_night";
+  yaParams.b_a_bool = false;
+  yaParams.y_a = "on";
+  yaParams.y_a_bool = true;
+  yaParams.domain = "old.yummyani.me";
+</script>
+
+<!-- Yandex.Metrika counter --> <script type="text/javascript" > (function(m,e,t,r,i,k,a){m[i]=m[i]||function(){(m[i].a=m[i].a||[]).push(arguments)}; m[i].l=1*new Date();k=e.createElement(t),a=e.getElementsByTagName(t)[0],k.async=1,k.src=r,a.parentNode.insertBefore(k,a)}) (window, document, "script", "https://cdn.jsdelivr.net/npm/yandex-metrica-watch/tag.js", "ym"); ym(58424476, "init", { clickmap:true, trackLinks:true, accurateTrackBounce:true, params:yaParams }); </script> <noscript><div><img src="https://mc.yandex.ru/watch/58424476" style="position:absolute; left:-9999px;" alt="" /></div></noscript> <!-- /Yandex.Metrika counter -->
+
+  </div>
+</body>
+</html>

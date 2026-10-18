@@ -23,6 +23,10 @@ downloads/
 *.mp4
 *.part.mp4
 
+# build artefacts (упаковка/сборка)
+dist/
+build/
+
 # python
 __pycache__/
 *.pyc

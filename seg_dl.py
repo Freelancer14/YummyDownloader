@@ -16,6 +16,18 @@ seg_dl — параллельная качка HLS-сегментов с пос�
     через subprocess (тоже уважает env-прокси).
   - DIRECT-маршрут до nova дохнет — всё ходит через прокси из env.
 
+HTTP-бэкенды (1.0.8):
+  Старая цепочка urllib -> curl остаётся рабочей по умолчанию и не тронута.
+  Добавлен альтернативный бэкенд на httpx — он сам ходит по 302 (follow_redirects)
+  и мультиплексирует h2, поэтому на практике curl.exe не нужен вовсе.
+    'auto'   — httpx, если пакет импортируется, иначе urllib->curl (по умолчанию)
+    'httpx'  — только httpx; если пакета нет — понятная ошибка, НЕ молчаливый откат
+    'urllib' — только старая цепочка
+  Выбор: core.CFG['http_backend'] (по умолчанию 'auto') либо set_backend() из CLI
+  (флаг --backend). httpx опционален: без него работает auto -> urllib -> curl.
+  На машине, где системный curl.exe сломан (CRYPT_E_REVOCATION_OFFLINE), httpx —
+  единственный живой путь до 302-redirect'ов.
+
 Публичное API:
   resolve_media(m3u8_url) -> (media_url, media_text)   # master -> media
   parse_segments(text, base_url) -> [url]              # EXTINF -> URL
@@ -23,6 +35,7 @@ seg_dl — параллельная качка HLS-сегментов с пос�
                          progress_cb=None, is_stopped=None) -> size
     progress_cb(done_count, total_count, bytes_done)
     is_stopped: threading.Event или callable. Остановка -> Stopped.
+  set_backend('auto'|'httpx'|'urllib'), effective_backend(), httpx_available()
   Ошибка склейки/качки -> SegError (вызывающий код делает fallback).
 """
 
@@ -73,10 +86,172 @@ def _curl_bin():
     return shutil.which("curl") or shutil.which("curl.exe")
 
 
+# ------------------------------------------------------- выбор HTTP-бэкенда
+BACKENDS = ("auto", "httpx", "urllib")
+
+_BACKEND_OVERRIDE = None          # задано set_backend() из CLI, иначе None
+_BACKEND_LOCK = threading.Lock()
+
+#: httpx-клиент создаётся лениво и переиспользуется всеми потоками пула.
+_HTTPX_CLIENT = None
+_HTTPX_MAX_CONN = 0
+_HTTPX_HTTP2 = None               # True/False — реально ли включился h2
+_HTTPX_LOCK = threading.Lock()
+
+_HTTPX_MIN_CONN = 16              # не меньше числа потоков сегментов
+_HTTPX_CHUNK = 1 << 16            # размер чанка при стриминге на диск
+
+
+def _import_httpx():
+    """Модуль httpx или None. Отсутствие пакета НЕ должно быть ImportError'ом
+    где-то в неожиданном месте — поэтому импорт ловим здесь."""
+    try:
+        import httpx
+        return httpx
+    except Exception:
+        return None
+
+
+def httpx_available():
+    """True, если пакет httpx установлен (проверка без сети)."""
+    return _import_httpx() is not None
+
+
+def _cfg_backend():
+    """Значение из core.CFG['http_backend']; core не импортируем жёстко —
+    он и так лежит рядом, но seg_dl должен работать и в одиночку."""
+    try:
+        import core
+        val = (getattr(core, "CFG", None) or {}).get("http_backend")
+    except Exception:
+        val = None
+    val = str(val or "auto").strip().lower()
+    return val if val in BACKENDS else "auto"
+
+
+def set_backend(name):
+    """Явно выбрать бэкенд (CLI --backend). None/'auto' — вернуть к конфигу."""
+    global _BACKEND_OVERRIDE
+    val = (name or "").strip().lower()
+    if val and val not in BACKENDS:
+        raise SegError("неизвестный HTTP-бэкенд: %r (допустимо %s)"
+                       % (name, "|".join(BACKENDS)))
+    with _BACKEND_LOCK:
+        _BACKEND_OVERRIDE = val or None
+    return effective_backend()
+
+
+def get_backend_override():
+    """Что задал set_backend(), либо None (решает конфиг). Для тестов."""
+    return _BACKEND_OVERRIDE
+
+
+def effective_backend():
+    """Что реально будет использовано: 'httpx' | 'urllib'.
+
+    Явный 'httpx' без пакета — ошибка, а не тихий откат: молчаливый откат
+    скрыл бы от пользователя, что он поставил не то."""
+    val = (_BACKEND_OVERRIDE or _cfg_backend()).strip().lower()
+    if val not in BACKENDS:
+        val = "auto"
+    if val == "urllib":
+        return "urllib"
+    if val == "httpx":
+        if not httpx_available():
+            raise SegError(
+                "бэкенд httpx запрошен, но пакет не установлен: "
+                'py -m pip install "httpx[http2]"')
+        return "httpx"
+    return "httpx" if httpx_available() else "urllib"     # auto
+
+
+def _build_httpx_client(httpx, max_conn):
+    """Клиент с теми же UA/Referer, что и urllib-путь, но с redirect'ами и h2."""
+    common = dict(follow_redirects=True,
+                  timeout=_TIMEOUT,
+                  headers={"User-Agent": UA, "Referer": REF},
+                  limits=httpx.Limits(max_connections=max_conn,
+                                      max_keepalive_connections=max_conn))
+    try:
+        # http2 требует пакет h2 (идёт в httpx[http2]); без него — обычный HTTP/1.1
+        return httpx.Client(http2=True, **common), True
+    except ImportError:
+        return httpx.Client(http2=False, **common), False
+
+
+def get_httpx_client(max_conn=None):
+    """Ленивый общий httpx.Client. Потокобезопасен (сам httpx.Client такой)."""
+    global _HTTPX_CLIENT, _HTTPX_MAX_CONN, _HTTPX_HTTP2
+    httpx = _import_httpx()
+    if httpx is None:
+        raise SegError('httpx не установлен: py -m pip install "httpx[http2]"')
+    want = max(int(max_conn or 0), _HTTPX_MIN_CONN, _HTTPX_MAX_CONN)
+    with _HTTPX_LOCK:
+        if _HTTPX_CLIENT is not None and _HTTPX_MAX_CONN >= want:
+            return _HTTPX_CLIENT
+        client, http2 = _build_httpx_client(httpx, want)
+        _HTTPX_CLIENT = client
+        _HTTPX_MAX_CONN = want
+        _HTTPX_HTTP2 = http2
+        return _HTTPX_CLIENT
+
+
+def httpx_http2_enabled():
+    """Реально ли поднялся h2 (None — клиент ещё не создан)."""
+    return _HTTPX_HTTP2
+
+
+def _reset_httpx_client():
+    """Сбросить клиент (только для тестов: изоляция между кейсами)."""
+    global _HTTPX_CLIENT, _HTTPX_MAX_CONN, _HTTPX_HTTP2
+    with _HTTPX_LOCK:
+        client, _HTTPX_CLIENT = _HTTPX_CLIENT, None
+        _HTTPX_MAX_CONN = 0
+        _HTTPX_HTTP2 = None
+    try:
+        if client is not None:
+            client.close()
+    except Exception:
+        pass
+
+
+def _fetch_bytes_httpx(url, ref=None, timeout=_TIMEOUT):
+    """Байты по URL одним httpx-запросом (redirect'ы следуются клиентом)."""
+    client = get_httpx_client()
+    r = client.get(url, headers={"User-Agent": UA, "Referer": ref or REF},
+                   timeout=timeout)
+    r.raise_for_status()
+    return r.content
+
+
+def _stream_to_file_httpx(url, out_path, ref=None, timeout=_TIMEOUT):
+    """Сегмент стримится прямо на диск — сегменты бывают по несколько МБ,
+    буферизовать их в памяти в пуле из 8 потоков незачем."""
+    client = get_httpx_client()
+    written = 0
+    with client.stream("GET", url,
+                       headers={"User-Agent": UA, "Referer": ref or REF},
+                       timeout=timeout) as r:
+        r.raise_for_status()
+        with open(out_path, "wb") as f:
+            for part in r.iter_bytes(_HTTPX_CHUNK):
+                f.write(part)
+                written += len(part)
+    return written
+
+
 # ------------------------------------------------------------------ fetch
 def fetch_bytes(url, ref=None, timeout=_TIMEOUT):
-    """Байты по URL: сначала urllib, при неудаче — curl. Иначе исключение."""
+    """Байты по URL. Бэкенд выбирает effective_backend(); старая цепочка
+    urllib -> curl остаётся как есть. Иначе исключение."""
     ref = ref or REF
+    if effective_backend() == "httpx":
+        try:
+            return _fetch_bytes_httpx(url, ref, timeout)
+        except (Stopped, SegError):
+            raise
+        except Exception as e:
+            raise SegError("httpx: %s" % str(e)[:120])
     try:
         req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": ref})
         r = urllib.request.urlopen(req, timeout=timeout, context=CTX)
@@ -169,41 +344,61 @@ def _is_mpegts(path):
 
 
 # ------------------------------------------------------------------ download
-def download_one(url, ref=None, timeout=_TIMEOUT, retries=_RETRIES):
-    """Один сегмент в память, ретраи + backoff. Иначе SegError."""
+def download_one(url, ref=None, timeout=_TIMEOUT, retries=_RETRIES, out_path=None):
+    """Один сегмент, ретраи + backoff. Иначе SegError.
+
+    out_path задан и бэкенд httpx -> сегмент пишется на диск потоком
+    (client.stream + чанки), возвращается размер. Иначе (urllib->curl, или httpx
+    без out_path) поведение прежнее: возвращаются байты."""
     ref = ref or REF
+    backend = effective_backend()
+    streaming = backend == "httpx" and out_path is not None
     last = "?"
     for attempt in range(1, max(1, retries) + 1):
-        # попытка A: urllib
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": ref})
-            r = urllib.request.urlopen(req, timeout=timeout, context=CTX)
+        if backend == "httpx":
             try:
-                data = r.read()
-            finally:
-                try:
-                    r.close()
-                except Exception:
-                    pass
-            if data:
-                return data
-            last = "пусто"
-        except Exception as e:
-            last = "urllib: %s" % str(e)[:100]
-        # попытка B: curl
-        curl = _curl_bin()
-        if curl:
-            try:
-                p = subprocess.run(
-                    [curl, "-sL", "--max-time", str(timeout),
-                     "-A", UA, "-e", ref, "-o", "-", url],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    timeout=timeout + 5)
-                if p.returncode == 0 and p.stdout:
-                    return p.stdout
-                last = "curl rc=%s" % p.returncode
+                if streaming:
+                    n = _stream_to_file_httpx(url, out_path, ref, timeout)
+                    if n:
+                        return n
+                else:
+                    data = _fetch_bytes_httpx(url, ref, timeout)
+                    if data:
+                        return data
+                last = "пусто"
             except Exception as e:
-                last = "curl: %s" % str(e)[:100]
+                last = "httpx: %s" % str(e)[:100]
+        else:
+            # попытка A: urllib
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": ref})
+                r = urllib.request.urlopen(req, timeout=timeout, context=CTX)
+                try:
+                    data = r.read()
+                finally:
+                    try:
+                        r.close()
+                    except Exception:
+                        pass
+                if data:
+                    return data
+                last = "пусто"
+            except Exception as e:
+                last = "urllib: %s" % str(e)[:100]
+            # попытка B: curl
+            curl = _curl_bin()
+            if curl:
+                try:
+                    p = subprocess.run(
+                        [curl, "-sL", "--max-time", str(timeout),
+                         "-A", UA, "-e", ref, "-o", "-", url],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        timeout=timeout + 5)
+                    if p.returncode == 0 and p.stdout:
+                        return p.stdout
+                    last = "curl rc=%s" % p.returncode
+                except Exception as e:
+                    last = "curl: %s" % str(e)[:100]
         if attempt < retries:
             time.sleep(attempt)  # backoff 1с, 2с, ...
     raise SegError("сегмент не скачался: %s" % last)
@@ -224,16 +419,26 @@ def download_segments(seg_urls, tmpdir, ref=None, seg_workers=8,
     paths = [os.path.join(tmpdir, "seg-%05d.ts" % i) for i in range(n)]
     lock = threading.Lock()
     state = {"done": 0, "bytes": 0}
+    backend = effective_backend()
+    # лимит соединений клиента не должен быть меньше числа потоков
+    if backend == "httpx":
+        get_httpx_client(max_conn=workers)
 
     def job(i, url):
         if _stopped(is_stopped):
             raise Stopped()
-        data = download_one(url, ref, _TIMEOUT, retries)
-        with open(paths[i], "wb") as f:
-            f.write(data)
+        if backend == "httpx":
+            # стрим прямо на диск: сегменты в памяти не копим
+            got = download_one(url, ref, _TIMEOUT, retries, out_path=paths[i])
+            size = got
+        else:
+            data = download_one(url, ref, _TIMEOUT, retries)
+            with open(paths[i], "wb") as f:
+                f.write(data)
+            size = len(data)
         with lock:
             state["done"] += 1
-            state["bytes"] += len(data)
+            state["bytes"] += size
             if progress_cb:
                 try:
                     progress_cb(state["done"], n, state["bytes"])
@@ -269,7 +474,7 @@ def _run(cmd, cwd=None):
     """Запустить ffmpeg, вернуть (rc, stderr_tail)."""
     try:
         r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           text=True, timeout=600, cwd=cwd)
+                           text=True, encoding="utf-8", errors="replace", timeout=600, cwd=cwd)
         err = (r.stderr or "").strip().splitlines()
         tail = err[-1][:200] if err else ""
         return r.returncode, tail, os.path.exists(cmd[-1]) if cmd else False

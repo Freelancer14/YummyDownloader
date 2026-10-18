@@ -1,2 +1,14 @@
+# Обязательные зависимости
 certifi>=2024.0.0
 imageio-ffmpeg>=0.4.9
+
+# Опциональная (1.0.8+). БЕЗ неё код полностью работоспособен: бэкенд
+# "auto" сам откатится на urllib -> curl. Ставить нужно, только если:
+#   * системный curl.exe сломан (например CRYPT_E_REVOCATION_OFFLINE) —
+#     тогда httpx единственный живой путь до 302-redirect'ов сегментов;
+#   * хочется HTTP/2 на CDN (мультиплексирование нескольких сегментов
+#     по одному соединению вместо пула из отдельных TCP-коннектов).
+# Установка:  py -3.9 -m pip install "httpx[http2]"
+# Выбор режима: config.json -> "http_backend": "auto" | "httpx" | "urllib"
+#               или CLI-флаг  --backend auto|httpx|urllib
+httpx[http2]>=0.24; python_version >= "3.9"
