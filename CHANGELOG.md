@@ -2,7 +2,7 @@
 
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версии — [Semantic Versioning](https://semver.org/). Полный перечень изменений
-форка — в [CHANGES_FORK.md](docs/CHANGES_FORK.md).
+форка — в разделах ниже, по версиям.
 
 ## [Unreleased]
 
