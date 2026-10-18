@@ -342,12 +342,20 @@ def gui_download_hls(m3u8_url, out_path, emit=None, stop_flag=None, attempts=3,
             size = seg_dl.download_hls_segmented(
                 m3u8_url, out_path, seg_workers=max(1, int(seg_workers or 8)),
                 progress_cb=_seg_emit, is_stopped=stop_flag)
-            if emit:
-                try:
-                    emit(size, size, 100.0, 0.0)
-                except Exception:
-                    pass
-            return size
+            ok, reason = yummy_dl.hls_file_ok(out_path)
+            if ok:
+                if emit:
+                    try:
+                        emit(size, size, 100.0, 0.0)
+                    except Exception:
+                        pass
+                return size
+            # сегменты сошлись в неиграбельный файл — удаляем и пробуем
+            # прямой ffmpeg ниже
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
         except seg_dl.Stopped:
             raise _StopDownload()
         except Exception:
@@ -420,18 +428,22 @@ def gui_download_hls(m3u8_url, out_path, emit=None, stop_flag=None, attempts=3,
                 pass
         ok = rc == 0 and os.path.exists(tmp) and os.path.getsize(tmp) >= 10000
         if ok:
-            os.replace(tmp, out_path)
-            try:
-                size = os.path.getsize(out_path)
-            except Exception:
-                size = 0
-            if emit:
+            ok, reason = yummy_dl.hls_file_ok(tmp, expected_dur=dur)
+            if ok:
+                os.replace(tmp, out_path)
                 try:
-                    emit(size, total_est, 100.0, 0.0)
+                    size = os.path.getsize(out_path)
                 except Exception:
-                    pass
-            return size
-        last_err = err.strip().splitlines()[-1] if err.strip() else "?"
+                    size = 0
+                if emit:
+                    try:
+                        emit(size, total_est, 100.0, 0.0)
+                    except Exception:
+                        pass
+                return size
+            last_err = "итог неиграбелен (%s)" % reason
+        else:
+            last_err = err.strip().splitlines()[-1] if err.strip() else "?"
         try:
             if os.path.exists(tmp):
                 os.remove(tmp)
@@ -659,16 +671,22 @@ def _gui_one_ep(q, num, title, iframe, quality, out, seg_workers,
     if stop_flag.is_set():
         return
     if os.path.exists(out):
-        try:
-            have = os.path.getsize(out)
-        except Exception:
-            have = 0
-        if have > 10000:
+        ok, why = yummy_dl.hls_file_ok(out)
+        if ok:
+            try:
+                have = os.path.getsize(out)
+            except Exception:
+                have = 0
             q.put(("ep_skip", {"num": num, "title": title, "size": have}))
             with lock:
                 done_box[0] += 1
                 q.put(("overall", {"done": done_box[0]}))
             return
+        q.put(("ep_recheck", {"num": num, "title": title, "reason": why}))
+        try:
+            os.remove(out)
+        except OSError:
+            pass
     q.put(("ep_start", {"num": num, "title": title}))
     prog = {"cur": 0}
 
@@ -1535,6 +1553,15 @@ class App:
             except Exception:
                 pass
             self._update_bar()
+        elif ev == "ep_recheck":
+            # старый файл оказался обрывком — качаем заново (см. _gui_one_ep)
+            key = self._key(p["title"], p["num"])
+            if key not in self.ep_widgets:
+                head = ("Серия %02d" % p["num"] if key[0] == "main"
+                        else "%s · %02d" % (p["title"][:18], p["num"]))
+                self._add_row(key, head)
+            self._set_row_text(key, "%s — повторно качаю: %s" % (
+                self.ep_widgets[key]["head"], str(p["reason"])[:60]))
         elif ev == "ep_skip":
             key = self._key(p["title"], p["num"])
             size = p.get("size", 0)

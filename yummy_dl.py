@@ -180,7 +180,16 @@ def download_hls(m3u8, out_path, attempts=3, progress_cb=None, is_stopped=None,
         try:
             seg_dl.download_hls_segmented(m3u8, out_path, seg_workers=seg_workers,
                                           progress_cb=progress_cb, is_stopped=is_stopped)
-            return
+            ok, reason = hls_file_ok(out_path)
+            if ok:
+                return
+            # сегменты сошлись в неиграбельный файл — удаляем и пробуем
+            # прямой ffmpeg ниже (там свой контроль итога)
+            print(f"(итог неиграбелен: {reason}, пробую ffmpeg напрямую...)", flush=True)
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
         except Exception as e:
             if isinstance(e, seg_dl.Stopped):
                 raise
@@ -197,16 +206,68 @@ def download_hls(m3u8, out_path, attempts=3, progress_cb=None, is_stopped=None,
     last_err = "?"
     for attempt in range(1, attempts + 1):
         r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        if r.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) >= 10000:
-            os.replace(tmp, out_path)
-            return
         last_err = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else "?"
+        if r.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) >= 10000:
+            ok, reason = hls_file_ok(tmp)
+            if ok:
+                os.replace(tmp, out_path)
+                return
+            # файл-обрывок (битый mp4): в итог не годится, качаем заново
+            last_err = "итог неиграбелен (%s)" % reason
         if os.path.exists(tmp):
             os.remove(tmp)
         if attempt < attempts:
             print(f"(попытка {attempt} не удалась, повтор...)", end=" ", flush=True)
             time.sleep(2 * attempt)
     raise RuntimeError("ffmpeg не справился: " + last_err)
+
+
+def hls_file_ok(path, expected_dur=None):
+    """Дешёвая проверка, что файл — играбельный mp4, а не обрывок качки.
+
+    Открываем файл ffmpeg'ом без выдачи (сам ffmpeg быстро выйдет с ошибкой
+    'At least one output file...', однако к тому моменту в stderr уже есть
+    баннер входа). Нет строки 'Duration:' или есть 'Invalid data' -> файла
+    нет как медиа: ffmpeg -c copy не дописывает moov при обрыве, поэтому
+    битый обрывок почти всегда даже не открывается.
+    Результат (ok, reason): при ok=False reason понятен человеку — он идёт
+    в лог «повторно качаю» / ошибку серии. expected_dur (>0) — эталон по
+    сумме EXTINF плейлиста: длительность файла должна попасть в 80..120%
+    эталона. Сама проверка не должна блокировать качку, поэтому при ошибке
+    запуска (ffmpeg отсутствует, timeout) возвращаем (True, '')."""
+    try:
+        if not os.path.exists(path) or os.path.getsize(path) < 10000:
+            return False, "нет файла или меньше 10 КБ"
+    except OSError:
+        return False, "файл недоступен"
+    try:
+        r = subprocess.run([FFMPEG, "-nostdin", "-i", path],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                           text=True, timeout=20)
+    except subprocess.TimeoutExpired:
+        return True, ""
+    except Exception as e:
+        print(f"(проверку файла не смог запустить: {str(e)[:80]} - считаю файл рабочим)")
+        return True, ""
+    err = r.stderr or ""
+    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", err)
+    lines = [ln.strip() for ln in err.splitlines() if ln.strip()]
+    if m is None or "invalid data" in err.lower():
+        why = next((ln for ln in lines
+                    if "invalid data" in ln.lower() or "moov" in ln.lower()),
+                   lines[-1] if lines else "ffmpeg молчит")
+        return False, "ffmpeg mp4 не прочитал (%s)" % why[:90]
+    if expected_dur and expected_dur > 0:
+        try:
+            h, mn, sec = m.groups()
+            dur = int(h) * 3600 + int(mn) * 60 + float(sec)
+            k = dur / float(expected_dur)
+            if not (0.8 <= k <= 1.2):
+                return False, ("длительность %.0fс у файла против %.0fс по плейлисту"
+                               % (dur, expected_dur))
+        except Exception:
+            pass
+    return True, ""
 
 # --------------------------------------------------------------------------- core
 SUB_PREFIX = "[саб] "
@@ -320,9 +381,16 @@ def grab_anime(anime_id, cfg, franchise_dir=None, dub_override=None, ep_filter=N
     todo = []
     for num in nums:
         out = os.path.join(out_dir, f"Серия {num:02d}.mp4")
-        if os.path.exists(out) and os.path.getsize(out) > 10000:
-            print(f"    [{num:02d}] уже есть - пропуск")
-            continue
+        if os.path.exists(out):
+            ok, why = hls_file_ok(out)
+            if ok:
+                print(f"    [{num:02d}] уже есть - пропуск")
+                continue
+            print(f"    [{num:02d}] повторно качаю: {why}")
+            try:
+                os.remove(out)
+            except OSError:
+                pass
         todo.append(num)
     if todo:
         print(f"    потоки: серии={min(workers, len(todo))}, сегменты={seg_workers}")
@@ -642,9 +710,16 @@ def tv_grab_anime(card_url, cfg, dub_override=None, ep_filter=None, enum=None):
     todo = []
     for num in nums:
         out = os.path.join(out_dir, f"Серия {num:02d}.mp4")
-        if os.path.exists(out) and os.path.getsize(out) > 10000:
-            print(f"    [{num:02d}] уже есть - пропуск")
-            continue
+        if os.path.exists(out):
+            ok, why = hls_file_ok(out)
+            if ok:
+                print(f"    [{num:02d}] уже есть - пропуск")
+                continue
+            print(f"    [{num:02d}] повторно качаю: {why}")
+            try:
+                os.remove(out)
+            except OSError:
+                pass
         todo.append(num)
     if todo:
         print(f"    потоки: серии={min(workers, len(todo))}, сегменты={seg_workers}")
