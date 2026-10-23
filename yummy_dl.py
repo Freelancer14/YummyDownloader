@@ -344,8 +344,27 @@ def _pop_str_flag(args, *names):
 
 
 if __name__ == "__main__":
-    os.makedirs(CFG["output_dir"], exist_ok=True)
     args = [a for a in sys.argv[1:] if a]
+    if "-h" in args or "--help" in args:
+        try:
+            with open(os.path.join(HERE, "VERSION"), encoding="utf-8") as _f:
+                _ver = " " + _f.read().strip()
+        except OSError:
+            _ver = ""
+        print("YummyDownloader%s — качалка аниме с YummyAnime (Kodik HLS)" % _ver)
+        print("""
+Использование:
+  py yummy_dl.py <ссылка|ID>              интерактивно: озвучка и серии
+  py yummy_dl.py <ссылка> --workers 4     параллельных серий (1-8)
+  py yummy_dl.py <ссылка> --segs 8        сегментов в пуле (0 = прямой ffmpeg)
+  py yummy_dl.py <ссылка> --backend httpx|urllib|auto
+  py yummy_dl.py <ссылка> --subs | --no-subs
+  py yummy_dl.py --help
+
+Настройки по умолчанию — config.json (образец: config.example.json).
+Окно: Start_GUI.cmd""")
+        sys.exit(0)
+    os.makedirs(CFG["output_dir"], exist_ok=True)
     workers, args = _pop_int_flag(args, "--workers")
     segs, args = _pop_int_flag(args, "--segs", "--seg-workers")
     backend, args = _pop_str_flag(args, "--backend")

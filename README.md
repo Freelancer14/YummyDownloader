@@ -6,7 +6,9 @@
 
 ### Скачивание
 
-Вариант 1 — зелёная кнопка Code → Download ZIP → распаковать. Вариант 2 — `git clone https://github.com/Freelancer14/YummyDownloader.git`.
+Вариант 1 (для пользователей) — вкладка **Releases** → скачать `YummyDownloader-<версия>.zip` → распаковать → двойной клик по `Start_GUI.cmd`. В архиве только программа: без `tests/` и служебных файлов.
+
+Вариант 2 (для разработки) — кнопка Code → Download ZIP или `git clone https://github.com/Freelancer14/YummyDownloader.git`: это полный репозиторий вместе с `tests/`; для запуска программы тесты не нужны.
 
 Двойной клик по `Start_GUI.cmd` — сам проверит Python 3.9+ (при отсутствии вызовет `Setup_Python.cmd` и поставит зависимости), затем откроет окно: вставь ссылку, нажми «Проверить», выбери озвучку и жми «Скачать».
 
