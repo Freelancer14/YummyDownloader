@@ -1,35 +1,19 @@
-# local config (may contain absolute paths / personal prefs)
+# локальный конфиг (абсолютные пути, личные настройки)
 config.json
 
-# СЕКРЕТЫ — НИКОГДА не коммитить
-# (комментарии только на отдельной строке — inline после паттерна git не понимает)
-# bot_secrets.json — токен бота, API_HASH, id канала, телефон/2FA
-bot_secrets.json
-# bot_config.json — содержит токен бота
-bot_config.json
-# *.session — вход в Telegram-аккаунт (Telethon)
-*.session
-*.session-journal
-
-# посторонний проект, случайно оказавшийся в папке
-tg_userbot2.py
-
-# временные папки скачивания
-bot_tmp/
-link_tmp/
-
-# downloaded media
+# скачанное видео
 downloads/
 *.mp4
 *.part.mp4
 
-# build artefacts (упаковка/сборка)
+# артефакты сборки: dist/ — релизные ZIP (tools/build_release.py)
 dist/
 build/
 
 # python
 __pycache__/
 *.pyc
+.pytest_cache/
 .venv/
 venv/
 
