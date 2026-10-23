@@ -118,7 +118,13 @@ def _urlopen_once(req, timeout, binary):
     Единственный шов для тестов и единственное место, где ловится обрыв:
     он прилетает и на urlopen (TLS-handshake), и на read (тело ответа)."""
     r = urllib.request.urlopen(req, timeout=timeout, context=CTX)
-    return r.read() if binary else r.read().decode("utf-8", "replace")
+    try:
+        return r.read() if binary else r.read().decode("utf-8", "replace")
+    finally:
+        try:
+            r.close()
+        except Exception:
+            pass
 
 
 def _with_retry(fn):
@@ -161,26 +167,64 @@ def api(path):
 
 
 # ----------------------------------------------------------------------------- utils
+#: Имена, которые Windows не даёт создать как файл/папку (регистр не важен).
+_WIN_RESERVED = ({"CON", "PRN", "AUX", "NUL"}
+                 | {"COM%d" % i for i in range(1, 10)}
+                 | {"LPT%d" % i for i in range(1, 10)})
+
+
 def sanitize(name):
-    name = re.sub(r'[\\/:*?"<>|]', "", str(name)).strip().rstrip(".")
-    return re.sub(r"\s+", " ", name) or "untitled"
+    if name is None:
+        return "untitled"
+    name = re.sub(r'[\\/:*?"<>|]', "", str(name)).strip()
+    # пробелы схлопываем ДО финальной чистки: иначе "Foo ." -> "Foo " (хвостовой
+    # пробел Windows молча обрежет, и папка окажется не там, где мы считали).
+    name = re.sub(r"\s+", " ", name).strip().rstrip(". ")
+    if not name:
+        return "untitled"
+    # CON/NUL/COM1... Windows не создаст даже с расширением — уводим подчёркиванием.
+    if name.split(".")[0].strip().upper() in _WIN_RESERVED:
+        name = "_" + name
+    return name
 
 
 def parse_ep_range(text, available):
-    """'5-12', '3,7,9', '5-' -> множество номеров. Пусто/'all' -> все."""
+    """'5-12', '3,7,9', '5-' -> множество номеров. Пусто/'all' -> все.
+
+    Возвращает только реально доступные номера: если пользователь попросил
+    несуществующую серию, результат пустой (вызывающий код покажет ошибку).
+    Раньше здесь стоял `keep & set(available) or set(available)`, из-за чего
+    любой промах молча превращался в «качать все серии»."""
+    avail = set(available or ())
+    avail_sorted = sorted(avail)
     text = (text or "").strip().lower()
     if not text or text in ("all", "все", "*"):
-        return set(available)
+        return set(avail)
     keep = set()
-    for part in text.replace(" ", "").split(","):
+    # Пробел — тоже разделитель: "1 2" это две серии, а не двенадцатая.
+    # Пробелы ВОКРУГ дефиса убираем заранее, иначе "5 - 12" распадается на
+    # "5", "-", "12" и превращается в две серии вместо диапазона.
+    text = re.sub(r"\s*-\s*", "-", text)
+    for part in re.split(r"[,;\s]+", text):
+        if not part:
+            continue
         if "-" in part:
-            a, _, b = part.partition("-")
-            a = int(a) if a else min(available)
-            b = int(b) if b else max(available)
-            keep.update(range(a, b + 1))
+            a_s, _, b_s = part.partition("-")
+            if not a_s and not b_s:
+                continue          # одинокий дефис — не диапазон
+            try:
+                a = int(a_s) if a_s else (avail_sorted[0] if avail_sorted else None)
+                b = int(b_s) if b_s else (avail_sorted[-1] if avail_sorted else None)
+            except ValueError:
+                continue          # "1-3-5" — мусор, не роняем весь прогон
+            if a is None or b is None or a > b:
+                continue
+            keep.update(n for n in range(a, b + 1) if n in avail)
         elif part.isdigit():
-            keep.add(int(part))
-    return keep & set(available) or set(available)
+            n = int(part)
+            if n in avail:
+                keep.add(n)
+    return keep
 
 
 # --------------------------------------------------------------------------- subs
@@ -260,14 +304,30 @@ def _ftor(sig, ktype, ident, khash, ref_url, quality):
     links = j.get("links") or {}
     if not links:
         raise RuntimeError("Kodik не отдал ссылки (links пуст)")
-    avail = sorted((int(q) for q in links if q.isdigit()))
-    if quality == "max" or not quality.isdigit():
+
+    def _src_of(q):
+        """Список ссылок качества q, если в нём есть непустой src."""
+        v = links.get(str(q))
+        if isinstance(v, list) and v and isinstance(v[0], dict) and v[0].get("src"):
+            return v[0]["src"]
+        return None
+
+    # Считаем только качества, у которых реально есть ссылка: иначе
+    # links["720"] == [] давал IndexError вместо понятной ошибки.
+    avail = sorted(int(q) for q in links
+                   if str(q).isdigit() and _src_of(q))
+    if not avail:
+        raise RuntimeError("Kodik не отдал ссылок с src (качества: %s)"
+                           % sorted(links)[:6])
+    # quality из config.json может прийти числом (720) — приводим к строке.
+    qtxt = str("max" if quality is None else quality).strip().lower()
+    if qtxt in ("", "max", "best") or not qtxt.isdigit():
         pick = avail[-1]
     else:
-        want = int(quality)
+        want = int(qtxt)
         le = [q for q in avail if q <= want]
         pick = le[-1] if le else avail[-1]
-    return kodik_decode(links[str(pick)][0]["src"]), pick
+    return kodik_decode(_src_of(pick)), pick
 
 
 def _iframe_sig(html):
@@ -275,11 +335,18 @@ def _iframe_sig(html):
     def var(n):
         m = re.search(rf'var {n} = "([^"]*)";', html)
         return m.group(1) if m else ""
+
+    def one(pat, what):
+        m = re.search(pat, html)
+        if not m:
+            raise RuntimeError("страница плеера Kodik не разобрана: нет %s" % what)
+        return m.group(1)
+
     return ({"domain": var("domain"), "d_sign": var("d_sign"), "pd": var("pd"),
              "pd_sign": var("pd_sign"), "ref": var("ref"), "ref_sign": var("ref_sign")},
-            re.search(r"\.type = '([^']+)'", html).group(1),
-            re.search(r"\.hash = '([^']+)'", html).group(1),
-            re.search(r"\.id = '([^']+)'", html).group(1))
+            one(r"\.type = '([^']+)'", ".type"),
+            one(r"\.hash = '([^']+)'", ".hash"),
+            one(r"\.id = '([^']+)'", ".id"))
 
 
 def kodik_m3u8(iframe_url, quality="max"):
@@ -468,13 +535,18 @@ def episode_path(out_dir, num):
 
 
 def select_group(groups, cfg, dub_override=None):
-    """Явный override -> приоритеты из конфига. None, если брать нечего."""
+    """Явный override -> приоритеты из конфига. None, если брать нечего.
+
+    Если пользователь ЯВНО выбрал озвучку, а её нет — возвращаем None
+    (тайтл пропускается с понятным сообщением), а не подсовываем другую:
+    раньше несовпавший override молча заменялся озвучкой из приоритетов."""
     if not groups:
         return None
     if dub_override:
         for n in groups:
             if dub_override.lower() in n.lower():
                 return n
+        return None
     return choose_dubbing(groups, cfg.get("preferred_dubbings") or [],
                           allow_subs=cfg.get("allow_subtitles", True),
                           sub_prefs=cfg.get("preferred_subs"))

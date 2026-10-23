@@ -179,10 +179,11 @@ class MeGroupsTests(unittest.TestCase):
     def test_episode_number_survives_junk(self):
         self.assertEqual(site_me.episode_number({"number": "7"}), 7)
         self.assertEqual(site_me.episode_number({"number": "12 (TV)"}), 12)
-        # Номера-не-цифры дают 0, а не исключение посреди разбора.
-        self.assertEqual(site_me.episode_number({"number": "OVA"}), 0)
-        self.assertEqual(site_me.episode_number({}), 0)
-        self.assertEqual(site_me.episode_number(None), 0)
+        # Спецвыпуск без номера больше не превращается в «Серия 00» (и не
+        # затирает нормальную серию ключом 0) — такие записи пропускаются.
+        self.assertIsNone(site_me.episode_number({"number": "OVA"}))
+        self.assertIsNone(site_me.episode_number({}))
+        self.assertIsNone(site_me.episode_number(None))
 
     def test_is_kodik_handles_missing_field(self):
         self.assertFalse(site_me.is_kodik({}))

@@ -10,7 +10,7 @@ parse_* — там же cookie-цепочка Referer'ов, её не дубли
   * data-player-anime-id / data-player-slot + data-player-title -> слоты;
   * .serial-translations-box  -> озвучки/переводы (чистая: parse_translations);
   * .series-options .season-N -> серии сезона (чистая: parse_seasons);
-  * '.Subtitles' в имени перевода -> префикс '[саб] '.
+  * ttype='subtitles' (или '.Subtitles' в имени) -> префикс '[саб] '.
 
 Чистые функции (сеть не трогают, тестируются на фикстурах):
   kodik_slots, pick_slot, translation_label, dub_name, translation_entry,
@@ -18,6 +18,7 @@ parse_* — там же cookie-цепочка Referer'ов, её не дубли
 Сеть — только в tv_enumerate / TvSite.title_info (через tv_adapter).
 """
 
+import re
 import time
 
 import tv_adapter as tva
@@ -28,20 +29,25 @@ from site_adapter import (SiteAdapter, TitleInfo, EpisodeRef,
 
 SUB_MARK = ".Subtitles"
 TV_HOST_LABEL = "(yummyanime.tv)"
+_NO_SEASON_WARNED = []
 
 
 # ----------------------------------------------------- чистый разбор (без сети)
 def kodik_slots(slots):
     """[(title, src)] kodik-слотов: kind=iframe + kodikplayer.com в src."""
-    return [(s["title"], s["src"]) for s in (slots or [])
-            if s.get("kind") == "iframe" and "kodikplayer.com" in (s.get("src") or "")]
+    return [((s or {}).get("title") or "", (s or {}).get("src") or "")
+            for s in (slots or [])
+            if (s or {}).get("kind") == "iframe"
+            and "kodikplayer.com" in ((s or {}).get("src") or "")]
 
 
 def pick_slot(slots):
     """Первый kodik-слот -> (название, абсолютный iframe)."""
+    slots = slots or []
     kodik = kodik_slots(slots)
     if not kodik:
-        have = ", ".join("%s (%s)" % (s["title"], s["kind"]) for s in slots) or "пусто"
+        have = ", ".join("%s (%s)" % ((s or {}).get("title"), (s or {}).get("kind"))
+                         for s in slots) or "пусто"
         raise RuntimeError("на .tv-карточке нет Kodik-слота, есть: " + have)
     slot_title, iframe = kodik[0]
     if iframe.startswith("//"):
@@ -50,10 +56,14 @@ def pick_slot(slots):
 
 
 def translation_label(tr):
-    """Имя перевода -> имя группы: '.Subtitles' -> префикс '[саб] '."""
-    raw = (tr or {}).get("title") or ""
+    """Имя перевода -> имя группы: сабы по ttype, иначе по '.Subtitles'."""
+    tr = tr or {}
+    raw = tr.get("title") or ""
+    bare = re.sub(re.escape(SUB_MARK), "", raw, flags=re.I).strip()
+    if str(tr.get("ttype") or "").strip().lower() == "subtitles":
+        return SUB_PREFIX + (bare or "сабы")
     if SUB_MARK in raw:
-        return SUB_PREFIX + raw.replace(SUB_MARK, "").strip()
+        return SUB_PREFIX + bare
     return raw
 
 
@@ -69,7 +79,16 @@ def translation_entry(tr, html, ref):
     seasons, sel = tva.parse_seasons(html)
     if not seasons:
         return None
-    season = sel if sel in seasons else max(seasons)
+    if sel is not None and sel not in seasons:
+        raise tva.TvError("сезон %s не найден в плеере (есть %s)"
+                          % (sel, sorted(seasons)))
+    if sel is None:
+        season = max(seasons)
+        if not _NO_SEASON_WARNED:
+            _NO_SEASON_WARNED.append(1)
+            print("[!] сезон не выбран в плеере — беру последний (%s)" % season)
+    else:
+        season = sel
     name = translation_label(tr)
     return name, {"tid": tr["tid"], "season": season, "eps": seasons[season],
                   "sig": tva.parse_sig(html), "ref": ref}
@@ -165,6 +184,9 @@ class TvSite(SiteAdapter):
         self.cfg = dict(cfg or CFG)
 
     def title_info(self, url_or_id) -> TitleInfo:
+        if not isinstance(url_or_id, str) or not url_or_id.strip().startswith("http"):
+            raise tva.TvError("для yummyanime.tv нужна ссылка на карточку "
+                              "вида /<id>-<slug>.html")
         return enum_to_title_info(tv_enumerate(url_or_id))
 
     def marker(self, label):
@@ -174,7 +196,7 @@ class TvSite(SiteAdapter):
         return is_sub(label)
 
     def marker_extra(self, info):
-        enum = ((info or {}).meta or {}).get("enum") or {}
+        enum = (getattr(info, "meta", None) or {}).get("enum") or {}
         return ["Плеер: %s %s" % (enum.get("slot"), TV_HOST_LABEL),
                 "Источник: %s" % enum.get("card_url")]
 

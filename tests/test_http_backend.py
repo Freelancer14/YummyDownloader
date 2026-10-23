@@ -370,12 +370,14 @@ class HttpxClientBuildTests(unittest.TestCase):
             def Client(**kwargs):
                 return FakeClient()
 
+        seg_dl._reset_httpx_client()
+        self.addCleanup(seg_dl._reset_httpx_client)
         with mock.patch.object(seg_dl, "_import_httpx", lambda: FakeModule):
             seg_dl.get_httpx_client(max_conn=4)
             seg_dl.get_httpx_client(max_conn=4)     # без роста
-            seg_dl.get_httpx_client(max_conn=32)    # вырос
-        self.assertEqual(seen, [max(4, seg_dl._HTTPX_MIN_CONN),
-                               max(32, seg_dl._HTTPX_MIN_CONN)])
+            seg_dl.get_httpx_client(max_conn=128)   # вырос выше общего пула
+        # пул не меньше общего параллелизма серий (см. _HTTPX_TOTAL_CONN)
+        self.assertEqual(seen, [max(4, seg_dl._HTTPX_TOTAL_CONN), 128])
 
     def test_client_http2_downgrades_when_h2_missing(self):
         """Без пакета h2 клиент должен подняться на HTTP/1.1, а не упасть."""

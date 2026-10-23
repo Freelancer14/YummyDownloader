@@ -93,10 +93,10 @@ _PLAYER_TMPL = ("https://" + TV_HOST +
 
 _URL_ID_RE = re.compile(r"/(\d+)-[^/]*\.html")
 _ANIME_ID_RE = re.compile(r'data-player-anime-id="(\d+)"')
-_SLOT_RE = re.compile(
-    r'data-player-slot="(\d+)"[^>]*data-player-title="([^"]*)"')
-_SLOT_RE_ALT = re.compile(
-    r'data-player-title="([^"]*)"[^>]*data-player-slot="(\d+)"')
+_SLOT_DIV_RE = re.compile(r"<div\b[^>]*\bdata-player-slot\b[^>]*>", re.I)
+_SLOT_ATTR_RE = re.compile(r"""\bdata-player-slot\s*=\s*["'](\d+)["']""", re.I)
+_SLOT_TITLE_RE = re.compile(r"""\bdata-player-title\s*=\s*["']([^"']*)["']""",
+                            re.I)
 
 
 def tv_card_id(card_url, html=None):
@@ -112,11 +112,15 @@ def tv_card_id(card_url, html=None):
 
 
 def _card_slots(html):
+    """[(slot, title)] из <div ... data-player-slot="N" ...> (title опционален)."""
     slots = {}
-    for m in _SLOT_RE.finditer(html):
-        slots[int(m.group(1))] = m.group(2)
-    for m in _SLOT_RE_ALT.finditer(html):
-        slots[int(m.group(2))] = m.group(1)
+    for m in _SLOT_DIV_RE.finditer(html or ""):
+        tag = m.group(0)
+        num = _SLOT_ATTR_RE.search(tag)
+        if not num:
+            continue
+        title = _SLOT_TITLE_RE.search(tag)
+        slots[int(num.group(1))] = title.group(1) if title else ""
     return sorted(slots.items())
 
 
@@ -139,10 +143,11 @@ def tv_slots(card_url, opener=None):
             _, body = op.get(url, ref=_XFP, extra={
                 "X-Requested-With": "XMLHttpRequest",
                 "Accept": "application/json"})
-        except urllib.error.HTTPError as e:
-            if getattr(e, "code", None) == 404:
-                continue  # слотов больше нет
-            raise TvError("player slot %d: %s" % (num, e))
+        except (urllib.error.HTTPError, TvError) as e:
+            # Слот мог отвалиться (404) или ответить 5xx: не теряем уже
+            # собранные слоты, «нет Kodik-слота» скажет pick_slot.
+            print("[!] player slot %d: пропуск (%s)" % (num, e))
+            continue
         try:
             j = json.loads(body)
             data = j.get("data") or {}
@@ -203,12 +208,20 @@ def tv_card_meta(card_url, opener=None):
 # ------------------------------------------------------- kodik serial parsing
 _OPT_RE = re.compile(r"<option\b(.*?)>(.*?)</option>", re.S)
 _ATTR_RE = re.compile(r'data-([a-z-]+)="([^"]*)"')
-_SEASON_DIV_RE = re.compile(r'<div class="season-(\d+)">(.*?)</div>\s*(?=<div|<style|<script|</div)',
-                            re.S)
-_SIG_RE = re.compile(r'var (domain|d_sign|pd|pd_sign|ref|ref_sign) = "([^"]*)";')
+_SEASON_DIV_RE = re.compile(
+    r'<div\b[^>]*class\s*=\s*["\'][^"\']*\bseason-(\d+)\b[^"\']*["\'][^>]*>'
+    r'(.*?)</div>\s*(?=<div|<style|<script|</div)',
+    re.S)
+_SIG_KEYS = ("domain", "d_sign", "pd", "pd_sign", "ref", "ref_sign")
+_SIG_RE = re.compile(
+    r"""var\s+(domain|d_sign|pd|pd_sign|ref|ref_sign)\s*=\s*['"]([^'"]*)['"]\s*;""")
 _TR_ID_RE = re.compile(r"var translationId = (\d+);")
 _SEL_TR_RE = re.compile(
     r'<option\b[^>]*data-id="(\d+)"[^>]*selected="selected"[^>]*>', re.S)
+_TR_BOX_RE = re.compile(
+    r'<div\b[^>]*class\s*=\s*["\'][^"\']*\bserial-translations-box\b[^"\']*["\'][^>]*>',
+    re.I)
+_DIV_TAG_RE = re.compile(r"<div\b[^>]*>|</div\s*>", re.I)
 
 
 def _attrs(opt_tag):
@@ -277,18 +290,45 @@ def parse_seasons(html):
 
 
 def parse_sig(html):
-    """Sig-поля страницы для POST /ftor."""
-    sig = dict(_SIG_RE.findall(html or ""))
-    for k in ("domain", "d_sign", "pd", "pd_sign", "ref", "ref_sign"):
-        sig.setdefault(k, "")
+    """Sig-поля страницы для POST /ftor.
+
+    Кавычки и пробелы вокруг '=' могут быть любыми. Если sig-переменные на
+    странице есть, но d_sign/ref_sign не разобрались — страница изменилась,
+    это честная ошибка, а не молчаливые пустые поля."""
+    found = dict(_SIG_RE.findall(html or ""))
+    sig = dict((key, found.get(key, "")) for key in _SIG_KEYS)
+    if found and (not sig["d_sign"] or not sig["ref_sign"]):
+        raise TvError("sig Kodik не разобран — страница плеера изменилась "
+                      "(d_sign/ref_sign пусты)")
     return sig
 
 
+def _translations_box(html):
+    """Фрагмент <div class=~serial-translations-box>...</div> либо None."""
+    m = _TR_BOX_RE.search(html or "")
+    if not m:
+        return None
+    depth = 1
+    for tag in _DIV_TAG_RE.finditer(html, m.end()):
+        depth += -1 if tag.group(0).startswith("</") else 1
+        if depth == 0:
+            return html[m.end():tag.start()]
+    return html[m.end():]
+
+
 def selected_translation_id(html):
-    m = _TR_ID_RE.search(html or "")
+    """data-id выбранного перевода — только из блока переводов.
+
+    Искать <option selected> по всей странице нельзя: первым попадается
+    выбранная серия из блока сезонов, и её id уезжает как id перевода."""
+    text = html or ""
+    m = _TR_ID_RE.search(text)
     if m:
         return m.group(1)
-    m = _SEL_TR_RE.search(html or "")
+    box = _translations_box(text)
+    if box is None:
+        return None
+    m = _SEL_TR_RE.search(box)
     return m.group(1) if m else None
 
 

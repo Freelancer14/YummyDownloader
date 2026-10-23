@@ -133,6 +133,9 @@ def ask_menu(info, items, cfg):
     sel = input("Выбери озвучку (номер, Enter = по умолчанию): ").strip()
     dub = names[int(sel) - 1] if sel.isdigit() and 1 <= int(sel) <= len(names) else default_dub
     eps_avail = sorted(groups[dub])
+    if not eps_avail:
+        print("[!] в этой озвучке нет ни одной серии — выбери другую.")
+        return None
 
     # --- 2. качество ---
     print("\nКачество:  1) макс (обычно 720)   2) 480   3) 360")
@@ -143,6 +146,9 @@ def ask_menu(info, items, cfg):
     print(f"\nСерии в этой озвучке: {eps_avail[0]}–{eps_avail[-1]} (всего {len(eps_avail)})")
     rng = input("Какие качать? (Enter = все, или напр. 5-12 / 3,7,9): ").strip()
     keep = parse_ep_range(rng, eps_avail)
+    if not keep:
+        print("[!] таких серий в этой озвучке нет — отменено.")
+        return None
 
     # --- 4. все сезоны франшизы ---
     vo = info.get("viewing_order") or []
@@ -223,12 +229,18 @@ def tv_ask_menu(enum, cfg):
     sel = input("Выбери озвучку (номер, Enter = по умолчанию): ").strip()
     dub = names[int(sel) - 1] if sel.isdigit() and 1 <= int(sel) <= len(names) else default_dub
     eps_avail = sorted(groups[dub])
+    if not eps_avail:
+        print("[!] в этой озвучке нет ни одной серии — выбери другую.")
+        return None
     print("\nКачество:  1) макс (обычно 720)   2) 480   3) 360")
     qmap = {"1": "max", "2": "480", "3": "360", "": cfg["quality"]}
     q = qmap.get(input(f"Выбери качество (Enter = {cfg['quality']}): ").strip(), cfg["quality"])
     print(f"\nСерии в этой озвучке: {eps_avail[0]}–{eps_avail[-1]} (всего {len(eps_avail)})")
     rng = input("Какие качать? (Enter = все, или напр. 5-12 / 3,7,9): ").strip()
     keep = parse_ep_range(rng, eps_avail)
+    if not keep:
+        print("[!] таких серий в этой озвучке нет — отменено.")
+        return None
     kind = "субтитры" if is_sub(dub) else "озвучка"
     print(f"\n>> Итог: {kind} «{dub}», качество {q}, серий {len(keep)}")
     if input("Начать? (Y/n): ").strip().lower() == "n":
@@ -264,7 +276,11 @@ def grab(url_or_id, cfg=None, interactive=False):
     if isinstance(url_or_id, str) and url_or_id.startswith("http"):
         page_id = resolve_page_id(url_or_id)
     else:
-        page_id = int(url_or_id)
+        try:
+            page_id = int(str(url_or_id).strip())
+        except (TypeError, ValueError):
+            print("[!] не понял ссылку/ID: %r" % (url_or_id,))
+            return
 
     dub_override = None
     ep_filter = None

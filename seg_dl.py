@@ -98,7 +98,11 @@ _HTTPX_MAX_CONN = 0
 _HTTPX_HTTP2 = None               # True/False — реально ли включился h2
 _HTTPX_LOCK = threading.Lock()
 
-_HTTPX_MIN_CONN = 16              # не меньше числа потоков сегментов
+#: Пул общий на процесс, а запросы идут из НЕСКОЛЬКИХ серий одновременно:
+#: клиент один, поэтому реальный лимит считается от общего параллелизма
+#: (по умолчанию 4-8 серий × 8 сегментов) — см. _HTTPX_TOTAL_CONN.
+_HTTPX_MIN_CONN = 16              # минимум на одну серию (прежняя семантика)
+_HTTPX_TOTAL_CONN = 64            # общий пул: 8 серий × 8 сегментов
 _HTTPX_CHUNK = 1 << 16            # размер чанка при стриминге на диск
 
 
@@ -167,11 +171,15 @@ def effective_backend():
 
 def _build_httpx_client(httpx, max_conn):
     """Клиент с теми же UA/Referer, что и urllib-путь, но с redirect'ами и h2."""
+    # max_conn — это потоки ОДНОЙ серии; клиент общий на процесс, а серий
+    # идёт до 8. Поэтому реальный пул — не меньше общего параллелизма:
+    # иначе половина запросов стоит в очереди и получает httpx.PoolTimeout.
+    pool = max(int(max_conn or 0), _HTTPX_TOTAL_CONN)
     common = dict(follow_redirects=True,
                   timeout=_TIMEOUT,
                   headers={"User-Agent": UA, "Referer": REF},
-                  limits=httpx.Limits(max_connections=max_conn,
-                                      max_keepalive_connections=max_conn))
+                  limits=httpx.Limits(max_connections=pool,
+                                      max_keepalive_connections=pool))
     try:
         # http2 требует пакет h2 (идёт в httpx[http2]); без него — обычный HTTP/1.1
         return httpx.Client(http2=True, **common), True
@@ -186,14 +194,22 @@ def get_httpx_client(max_conn=None):
     if httpx is None:
         raise SegError('httpx не установлен: py -m pip install "httpx[http2]"')
     want = max(int(max_conn or 0), _HTTPX_MIN_CONN, _HTTPX_MAX_CONN)
+    old = None
     with _HTTPX_LOCK:
         if _HTTPX_CLIENT is not None and _HTTPX_MAX_CONN >= want:
             return _HTTPX_CLIENT
         client, http2 = _build_httpx_client(httpx, want)
-        _HTTPX_CLIENT = client
+        # старый клиент (и его пул keep-alive сокетов) закрываем, а не бросаем
+        # на съедение GC: при смене seg_workers он иначе висит до конца процесса.
+        old, _HTTPX_CLIENT = _HTTPX_CLIENT, client
         _HTTPX_MAX_CONN = want
         _HTTPX_HTTP2 = http2
-        return _HTTPX_CLIENT
+    if old is not None:
+        try:
+            old.close()
+        except Exception:
+            pass
+    return client
 
 
 def httpx_http2_enabled():
@@ -315,7 +331,19 @@ def parse_segments(text, base_url):
     return segs
 
 
-_KEY_RE = re.compile(r"#EXT-X-KEY:[^\r\n]*METHOD=([^,\s]+)", re.I)
+_KEY_RE = re.compile(r"#EXT-X-(?:SESSION-)?KEY:[^\r\n]*METHOD=([^,\s]+)", re.I)
+_EXTINF_RE = re.compile(r"#EXTINF:\s*([0-9]+(?:\.[0-9]+)?)")
+
+
+def playlist_duration(media_text):
+    """Сумма #EXTINF медиа-плейлиста в секундах (0.0, если тегов нет)."""
+    total = 0.0
+    for m in _EXTINF_RE.finditer(media_text or ""):
+        try:
+            total += float(m.group(1))
+        except ValueError:
+            pass
+    return total
 
 
 def playlist_needs_fallback(media_text):
@@ -324,9 +352,12 @@ def playlist_needs_fallback(media_text):
     Возвращает строку-причину (и вызывающий код должен уйти в fallback
     на прямой ffmpeg с нативным HLS-демуксером), либо None."""
     txt = media_text or ""
-    m = _KEY_RE.search(txt)
-    if m and m.group(1).strip().upper() not in ("NONE",):
-        return "encrypted HLS (%s)" % m.group(1).strip()
+    # Смотрим ВСЕ ключи: METHOD=NONE в начале не отменяет AES-128 дальше
+    # (ротация ключей, рекламные вставки). SESSION-KEY ловим тем же регекспом.
+    for m in _KEY_RE.finditer(txt):
+        meth = m.group(1).strip()
+        if meth.upper() != "NONE":
+            return "encrypted HLS (%s)" % meth
     if "#EXT-X-MAP" in txt:
         return "fmp4 init segment (EXT-X-MAP)"
     if "#EXT-X-DISCONTINUITY" in txt or "#EXT-X-GAP" in txt:
@@ -344,7 +375,22 @@ def _is_mpegts(path):
 
 
 # ------------------------------------------------------------------ download
-def download_one(url, ref=None, timeout=_TIMEOUT, retries=_RETRIES, out_path=None):
+def _looks_like_error_page(head):
+    """Похоже ли начало сегмента на HTML/JSON-заглушку CDN, а не на медиа.
+
+    Ловим именно страницы ошибок (200 OK с html), а не «не TS»: реальную
+    проверку sync-byte делает concat_copy, но к тому моменту вся серия уже
+    скачана. Такой сегмент дешевле перекачать сразу."""
+    if not head:
+        return False
+    h = head[:512].lstrip().lower()
+    return (h.startswith(b"<!doctype") or h.startswith(b"<html")
+            or h.startswith(b"<?xml") or h.startswith(b"{")
+            or b"<html" in h[:200])
+
+
+def download_one(url, ref=None, timeout=_TIMEOUT, retries=_RETRIES, out_path=None,
+                 is_stopped=None):
     """Один сегмент, ретраи + backoff. Иначе SegError.
 
     out_path задан и бэкенд httpx -> сегмент пишется на диск потоком
@@ -355,17 +401,27 @@ def download_one(url, ref=None, timeout=_TIMEOUT, retries=_RETRIES, out_path=Non
     streaming = backend == "httpx" and out_path is not None
     last = "?"
     for attempt in range(1, max(1, retries) + 1):
+        if _stopped(is_stopped):
+            raise Stopped()
         if backend == "httpx":
             try:
                 if streaming:
                     n = _stream_to_file_httpx(url, out_path, ref, timeout)
                     if n:
-                        return n
+                        try:
+                            with open(out_path, "rb") as f:
+                                head = f.read(512)
+                        except OSError:
+                            head = b""
+                        if _looks_like_error_page(head):
+                            last = "CDN отдал html вместо сегмента"
+                        else:
+                            return n
                 else:
                     data = _fetch_bytes_httpx(url, ref, timeout)
-                    if data:
+                    if data and not _looks_like_error_page(data):
                         return data
-                last = "пусто"
+                    last = "CDN отдал html вместо сегмента" if data else "пусто"
             except Exception as e:
                 last = "httpx: %s" % str(e)[:100]
         else:
@@ -380,9 +436,9 @@ def download_one(url, ref=None, timeout=_TIMEOUT, retries=_RETRIES, out_path=Non
                         r.close()
                     except Exception:
                         pass
-                if data:
+                if data and not _looks_like_error_page(data):
                     return data
-                last = "пусто"
+                last = "CDN отдал html вместо сегмента" if data else "пусто"
             except Exception as e:
                 last = "urllib: %s" % str(e)[:100]
             # попытка B: curl
@@ -395,8 +451,11 @@ def download_one(url, ref=None, timeout=_TIMEOUT, retries=_RETRIES, out_path=Non
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                         timeout=timeout + 5)
                     if p.returncode == 0 and p.stdout:
-                        return p.stdout
-                    last = "curl rc=%s" % p.returncode
+                        if not _looks_like_error_page(p.stdout):
+                            return p.stdout
+                        last = "CDN отдал html вместо сегмента"
+                    else:
+                        last = "curl rc=%s" % p.returncode
                 except Exception as e:
                     last = "curl: %s" % str(e)[:100]
         if attempt < retries:
@@ -429,21 +488,24 @@ def download_segments(seg_urls, tmpdir, ref=None, seg_workers=8,
             raise Stopped()
         if backend == "httpx":
             # стрим прямо на диск: сегменты в памяти не копим
-            got = download_one(url, ref, _TIMEOUT, retries, out_path=paths[i])
+            got = download_one(url, ref, _TIMEOUT, retries, out_path=paths[i],
+                               is_stopped=is_stopped)
             size = got
         else:
-            data = download_one(url, ref, _TIMEOUT, retries)
+            data = download_one(url, ref, _TIMEOUT, retries, is_stopped=is_stopped)
             with open(paths[i], "wb") as f:
                 f.write(data)
             size = len(data)
         with lock:
             state["done"] += 1
             state["bytes"] += size
-            if progress_cb:
-                try:
-                    progress_cb(state["done"], n, state["bytes"])
-                except Exception:
-                    pass
+            done, nbytes = state["done"], state["bytes"]
+        # колбэк — ВНЕ лока: медленный GUI-колбэк иначе сериализует все потоки
+        if progress_cb:
+            try:
+                progress_cb(done, n, nbytes)
+            except Exception:
+                pass
         return i
 
     with ThreadPoolExecutor(max_workers=workers,
@@ -482,7 +544,7 @@ def _run(cmd, cwd=None):
         return 1, str(e)[:200], False
 
 
-def concat_copy(part_files, out_tmp):
+def concat_copy(part_files, out_tmp, err_box=None):
     """Склейка без перекодирования. True/False (False -> вызывающий код fallback'ит).
 
     v2: concat-демуксер даже с +genpts оставляет микрофризы на стыках .ts.
@@ -491,9 +553,21 @@ def concat_copy(part_files, out_tmp):
     `ffmpeg -i combined.ts -c copy`. Это ближе к нативному HLS-демуксеру,
     чем склейка по файлам. Не вышло — пробуем старый concat-демуксер,
     не вышло и он — False (caller уйдет на прямой ffmpeg с m3u8).
-    Не-TS файлы (нет sync-byte 0x47) сразу в fallback."""
-    if not part_files:
+    Не-TS файлы (нет sync-byte 0x47) сразу в fallback.
+
+    err_box: если передан список, причина неудачи кладётся туда — так каждый
+    вызов получает СВОЮ причину (раньше она жила в concat_copy.last_error,
+    общем для всех потоков, и чужие серии путались в отчёте)."""
+    def _no(msg):
+        if err_box is not None:
+            try:
+                err_box.append(msg)
+            except Exception:
+                pass
         return False
+
+    if not part_files:
+        return _no("нет сегментов")
     partdir = os.path.dirname(os.path.abspath(part_files[0]))
     lst = os.path.join(partdir, "concat.txt")
     combined = os.path.join(partdir, "combined.ts")
@@ -501,18 +575,20 @@ def concat_copy(part_files, out_tmp):
     try:
         for p in part_files:
             try:
-                if os.path.getsize(p) <= 0 or not _is_mpegts(p):
-                    return False
+                if os.path.getsize(p) <= 0:
+                    return _no("пустой сегмент %s" % os.path.basename(p))
+                if not _is_mpegts(p):
+                    return _no("сегмент не MPEG-TS (%s)" % os.path.basename(p))
             except OSError:
-                return False
+                return _no("сегмент недоступен: %s" % os.path.basename(p))
         # 1) бинарный кат -> combined.ts
         try:
             with open(combined, "wb") as out:
                 for p in part_files:
                     with open(p, "rb") as f:
                         shutil.copyfileobj(f, out, length=1024 * 256)
-        except Exception:
-            return False
+        except Exception as e:
+            return _no("не смог склеить сегменты: %s" % str(e)[:120])
         # 2) один ремукс combined.ts -> mp4
         cmd = [FFMPEG, "-y", "-loglevel", "error",
                "-fflags", "+genpts+discardcorrupt",
@@ -543,11 +619,12 @@ def concat_copy(part_files, out_tmp):
                 os.remove(out_abs)
         except Exception:
             pass
-        # причину оставляем в файле-марке для диагностики caller'а через исключение
+        # причину оставляем и в атрибуте (совместимость), и в err_box (своя
+        # причина на каждый вызов — так делают все вызывающие места)
         concat_copy.last_error = last_tail or "ffmpeg remux failed"
-        return False
-    except Exception:
-        return False
+        return _no(concat_copy.last_error)
+    except Exception as e:
+        return _no("склейка упала: %s" % str(e)[:120])
     finally:
         for tmp in (lst, combined):
             try:
@@ -579,29 +656,51 @@ def download_hls_segmented(m3u8_url, out_path, seg_workers=8, ref=None,
     segs = parse_segments(media, media_url)
     if not segs:
         raise SegError("в плейлисте нет сегментов")
+    duration = playlist_duration(media)
     tmpdir = out_path + ".segs"
     if os.path.exists(tmpdir):
         shutil.rmtree(tmpdir, ignore_errors=True)
     tmp = out_path + ".part.mp4"
+
+    def _rm(p):
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+        except OSError:
+            pass
+
     try:
         parts = download_segments(segs, tmpdir, ref, seg_workers,
                                   retries, progress_cb, is_stopped)
         if _stopped(is_stopped):
             raise Stopped()
-        if not concat_copy(parts, tmp):
-            detail = getattr(concat_copy, "last_error", "") or ""
+        why = []
+        if not concat_copy(parts, tmp, err_box=why):
+            detail = (why[0] if why else
+                      (getattr(concat_copy, "last_error", "") or ""))
             raise SegError("ffmpeg concat не смог склеить%s" % (
                 (": " + detail[:120]) if detail else ""))
+        # Сверяем длительность итога с суммой EXTINF. Иначе недокачанный
+        # хвост (edge-кэш, обрыв) выглядит как валидный mp4 — и resume
+        # навсегда считает серию готовой.
+        if duration > 0:
+            try:
+                import core as _core          # ленивый импорт: core -> seg_dl тоже ленивый
+                ok, bad = _core.hls_file_ok(tmp, expected_dur=duration)
+            except Exception:
+                ok, bad = True, ""
+            if not ok:
+                _rm(tmp)
+                raise SegError("итог не сходится с плейлистом: %s" % bad)
         os.replace(tmp, out_path)
         return os.path.getsize(out_path)
-    except (Stopped, SegError):
+    except Stopped:
+        _rm(tmp)
+        raise
+    except SegError:
         raise
     except Exception as e:
+        _rm(tmp)
         raise SegError(str(e)[:150])
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
-        try:
-            if os.path.exists(tmp) and not os.path.exists(out_path):
-                pass  # part-файл оставляем решению вызывающего кода
-        except Exception:
-            pass

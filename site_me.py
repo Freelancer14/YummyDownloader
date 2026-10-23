@@ -15,6 +15,7 @@ kodikplayer.com в iframe_url — поэтому и вынесено в отде
 """
 
 import re
+import unicodedata
 
 from core import SITE, CFG, http_get, api, sanitize, is_sub, SUB_PREFIX
 from site_adapter import (SiteAdapter, TitleInfo, EpisodeRef,
@@ -23,14 +24,19 @@ from site_adapter import (SiteAdapter, TitleInfo, EpisodeRef,
 DUB_PREFIX = "Озвучка "
 SUB_RAW_PREFIX = "Субтитры "
 
+_META_PAGE_ID_RE = re.compile(r"<meta\b[^>]*\bpage_id\b[^>]*>", re.I)
+_META_CONTENT_RE = re.compile(r"""content\s*=\s*["']\s*(\d+)\s*["']""", re.I)
+_GROUP_PREFIX_RE = re.compile(r"^(озвучка|субтитры)\b\s*", re.I)
+
 
 # --------------------------------------------------------- чистый разбор (без сети)
 def parse_page_id(html):
-    """'page_id" content="12345"' -> 12345."""
-    m = re.search(r'page_id"\s*content="(\d+)"', html or "")
-    if not m:
-        raise RuntimeError("не нашёл page_id на странице - проверь ссылку")
-    return int(m.group(1))
+    """page_id из <meta ... page_id ... content="12345"> — в любом порядке."""
+    for tag in _META_PAGE_ID_RE.finditer(html or ""):
+        m = _META_CONTENT_RE.search(tag.group(0))
+        if m:
+            return int(m.group(1))
+    raise RuntimeError("не нашёл page_id на странице - проверь ссылку")
 
 
 def is_kodik(item):
@@ -40,18 +46,29 @@ def is_kodik(item):
 
 def group_label(item):
     """data.dubbing -> имя группы: 'Озвучка AniLibria' -> 'AniLibria',
-    'Субтитры Crunchyroll' -> '[саб] Crunchyroll'."""
-    d = (item or {}).get("data") or {}
-    return (d.get("dubbing") or "Без названия") \
-        .replace(DUB_PREFIX, "").replace(SUB_RAW_PREFIX, SUB_PREFIX).strip()
+    'Субтитры Crunchyroll' -> '[саб] Crunchyroll'.
+
+    Префикс ищется регуляркой после NFKC-нормализации: '.replace()' не ловил
+    «Субтитры» без имени и неразрывные пробелы."""
+    raw = ((item or {}).get("data") or {}).get("dubbing")
+    d = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", str(raw or ""))).strip()
+    m = _GROUP_PREFIX_RE.match(d)
+    if not m:
+        return d or "Без названия"
+    rest = d[m.end():].strip()
+    if m.group(1).lower() == "субтитры":
+        return SUB_PREFIX + (rest or "сабы")
+    return rest or "Без названия"
 
 
 def episode_number(item):
-    """Номер серии из item.number — в нём бывают не только цифры."""
-    try:
-        return int(re.sub(r"\D", "", str((item or {}).get("number"))) or 0)
-    except Exception:
-        return 0
+    """Номер серии из item.number: первое целое в строке, иначе None.
+
+    '1.5' -> 1 (а не 15), 'SP1' -> 1, 'OVA' -> None (серию без номера
+    пропускаем, а не пишем под ключом 0)."""
+    s = str((item or {}).get("number") or "")
+    m = re.search(r"(\d+)", s)
+    return int(m.group(1)) if m else None
 
 
 def groups_from_items(items):
@@ -60,7 +77,18 @@ def groups_from_items(items):
     for it in items or []:
         if not is_kodik(it):
             continue
-        groups.setdefault(group_label(it), {})[episode_number(it)] = it.get("iframe_url") or ""
+        num = episode_number(it)
+        if num is None:
+            print("[!] серия без номера пропущена: %r"
+                  % ((it or {}).get("number"),))
+            continue
+        name = group_label(it)
+        eps = groups.setdefault(name, {})
+        if num in eps:
+            print("[!] серия %s в группе «%s» повторяется — оставляю первую"
+                  % (num, name))
+            continue
+        eps[num] = it.get("iframe_url") or ""
     return groups
 
 

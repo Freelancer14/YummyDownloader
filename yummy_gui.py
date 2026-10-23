@@ -22,7 +22,7 @@ import tkinter as tk
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, messagebox
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -357,10 +357,22 @@ def gui_download_hls(m3u8_url, out_path, emit=None, stop_flag=None, attempts=3,
             except OSError:
                 pass
         except seg_dl.Stopped:
+            try:
+                os.remove(out_path + ".part.mp4")
+            except OSError:
+                pass
             raise _StopDownload()
         except Exception:
             pass  # ниже fallback: старый ffmpeg-путь
     tmp = out_path + ".part.mp4"
+
+    def _drop_part():
+        """Убрать недокачанный временный файл (после отмены/сбоя)."""
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
     cmd = [yummy_dl.FFMPEG, "-y", "-loglevel", "error", "-nostats",
            "-progress", "pipe:1",
            "-referer", "https://kodikplayer.com/", "-user_agent", yummy_dl.UA,
@@ -389,6 +401,10 @@ def gui_download_hls(m3u8_url, out_path, emit=None, stop_flag=None, attempts=3,
                 pass
 
     last_err = "?"
+    # строки -progress — не ошибки, в err_tail их не кладём
+    _prog_prefixes = ("out_time_ms=", "out_time_us=", "out_time=", "frame=",
+                      "fps=", "stream_0_0_q=", "bitrate=", "total_size=",
+                      "dup_frames=", "drop_frames=", "speed=", "progress=")
     for attempt in range(1, attempts + 1):
         if stop_flag is not None and stop_flag.is_set():
             raise _StopDownload()
@@ -398,10 +414,17 @@ def gui_download_hls(m3u8_url, out_path, emit=None, stop_flag=None, attempts=3,
         except Exception:
             pass
         send(None)
+        # stderr в ту же трубу: одна труба не переполняется и не дедлочит
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", bufsize=1)
+                                stderr=subprocess.STDOUT, text=True,
+                                encoding="utf-8", errors="replace", bufsize=1)
+        err_tail = []
+        rc = None
         try:
             for line in proc.stdout:
+                if stop_flag is not None and stop_flag.is_set():
+                    proc.kill()
+                    raise _StopDownload()
                 parsed = parse_progress_value(line)
                 if parsed and parsed[0] == "time_ms":
                     pct = None
@@ -419,13 +442,32 @@ def gui_download_hls(m3u8_url, out_path, emit=None, stop_flag=None, attempts=3,
                     send(pct)
                 elif parsed == ("progress", "end"):
                     break
-            err = proc.stderr.read() or ""
+                else:
+                    s = (line or "").strip()
+                    if s and not s.startswith(_prog_prefixes):
+                        err_tail.append(s)
+                        del err_tail[:-8]  # держим только хвост
             rc = proc.wait()
         finally:
+            # гасим ffmpeg при любом выходе: отмена, исключение, зависание
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                proc.wait(timeout=10)
+            except Exception:
+                pass
             try:
                 proc.stdout.close()
             except Exception:
                 pass
+            if stop_flag is not None and stop_flag.is_set():
+                _drop_part()
+        if stop_flag is not None and stop_flag.is_set():
+            _drop_part()
+            raise _StopDownload()
         ok = rc == 0 and os.path.exists(tmp) and os.path.getsize(tmp) >= 10000
         if ok:
             ok, reason = yummy_dl.hls_file_ok(tmp, expected_dur=dur)
@@ -443,7 +485,7 @@ def gui_download_hls(m3u8_url, out_path, emit=None, stop_flag=None, attempts=3,
                 return size
             last_err = "итог неиграбелен (%s)" % reason
         else:
-            last_err = err.strip().splitlines()[-1] if err.strip() else "?"
+            last_err = err_tail[-1] if err_tail else "?"
         try:
             if os.path.exists(tmp):
                 os.remove(tmp)
@@ -706,6 +748,7 @@ def _gui_one_ep(q, num, title, iframe, quality, out, seg_workers,
         q.put(("ep_done", {"num": num, "title": title,
                            "size": size, "q": qp}))
     except _StopDownload:
+        q.put(("ep_stop", {"num": num, "title": title}))
         return  # outer по флагу положит ("stopped", ...) один раз
     except Exception as e:
         q.put(("ep_error", {"num": num, "title": title,
@@ -847,20 +890,20 @@ class App:
         self.checked_url = ""
         self.state = "idle"
         self.stop_flag = threading.Event()
-        self.worker = None
         self._installing = False  # идет ли фоновая установка зависимостей
         self.ep_total = 0
         self.ep_done = 0
         self.ep_widgets = {}      # (title, num) -> {"var", "bar", "head", "mode"}
         self.ep_info = {}         # (title, num) -> {"est": None|bytes, "final": None|bytes}
+        self.ep_live = {}         # key -> последний cur качающейся серии
         self.main_title = None
         self.done_bytes = 0
-        self._active_cur = 0
-        self._active_key = None
         self.over_tracker = SpeedTracker(3.0)
         self._build_widgets()
         self.set_state("idle")
         self.refresh_deps_label()  # тихая проверка, без автоустановки
+        # закрытие окна не оставляет качку в фоне
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(100, self._poll)
 
     # -- layout --
@@ -1128,8 +1171,6 @@ class App:
                 w.configure(state=s)
             except Exception:
                 pass
-        for w in self.root.pack_slaves():
-            pass  # радиокнопки качества переключаем отдельно
         # радиокнопки: ищем по типу
         for w in self._all_children(self.root):
             if isinstance(w, ttk.Radiobutton):
@@ -1205,13 +1246,11 @@ class App:
                 self.set_state("error", msg)
                 return
         self._clear_rows()
-        self.ep_rows = {}
         self.ep_total = 0
         self.ep_done = 0
         self.main_title = None
         self.done_bytes = 0
-        self._active_cur = 0
-        self._active_key = None
+        self.ep_live = {}
         self.over_tracker.reset()
         self.bar["value"] = 0
         self.bar_label.configure(text="0/…")
@@ -1222,18 +1261,29 @@ class App:
             workers = max(1, min(int(self.workers_var.get() or 4), 8))
         except Exception:
             workers = 4
-        self.worker = threading.Thread(target=download_worker,
-                                       args=(tasks, dict(self.cfg,
-                                                          quality=self.q_var.get(),
-                                                          workers=workers),
-                                             self.q, self.stop_flag),
-                                       daemon=True)
-        self.worker.start()
+        threading.Thread(target=download_worker,
+                         args=(tasks, dict(self.cfg,
+                                           quality=self.q_var.get(),
+                                           workers=workers),
+                               self.q, self.stop_flag),
+                         daemon=True).start()
 
     def on_cancel(self):
         self.stop_flag.set()
         self.status_var.set("Останавливаю после текущей серии...")
         self.cancel_btn.configure(state="disabled")
+
+    def on_close(self):
+        """Закрыть окно: флаг стоп -> destroy. Потоки daemon, ffmpeg
+        убивает себя проверкой флага в цикле чтения (<= ~1 c)."""
+        try:
+            self.stop_flag.set()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
     def on_retry_one(self, _ev):
         # Подсказка: повтор одной упавшей серии — нажать Скачать заново,
@@ -1353,11 +1403,20 @@ class App:
     def _poll(self):
         try:
             while True:
-                ev, payload = self.q.get_nowait()
-                self._handle(ev, payload)
-        except queue.Empty:
-            pass
-        self.root.after(100, self._poll)
+                try:
+                    ev, payload = self.q.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    self._handle(ev, payload)
+                except Exception as e:
+                    # одно кривое событие не должно убивать насос
+                    sys.stderr.write("GUI: ошибка обработки %r: %s\n" % (ev, e))
+        finally:
+            try:
+                self.root.after(100, self._poll)
+            except Exception:
+                pass  # окно уже закрыто
 
     def _wheel_on(self, _ev):
         try:
@@ -1392,6 +1451,7 @@ class App:
             pass
         self.ep_widgets = {}
         self.ep_info = {}
+        self.ep_live = {}
 
     def _add_row(self, key, head):
         try:
@@ -1507,8 +1567,7 @@ class App:
             self.ep_total = len(nums)
             self.ep_done = 0
             self.done_bytes = 0
-            self._active_cur = 0
-            self._active_key = None
+            self.ep_live = {}
             self.over_tracker.reset()
             self._update_bar()
         elif ev == "season":
@@ -1532,8 +1591,7 @@ class App:
                 self._add_row(key, head)
             self._set_row_text(key, self.ep_widgets[key]["head"] + " — качается…")
             self._set_row_bar(key, None)
-            self._active_key = key
-            self._active_cur = 0
+            self.ep_live[key] = 0
             self.status_var.set("Качается серия %02d..." % p["num"])
         elif ev == "ep_prog":
             key = self._key(p["title"], p["num"])
@@ -1545,11 +1603,10 @@ class App:
                 key, p.get("pct"), p.get("cur", 0),
                 p.get("total_est"), p.get("speed", 0)))
             self._set_row_bar(key, p.get("pct"))
-            if self._active_key is None:
-                self._active_key = key
-            self._active_cur = p.get("cur", 0)
+            self.ep_live[key] = p.get("cur", 0)
             try:
-                self.over_tracker.add(time.time(), self.done_bytes + self._active_cur)
+                self.over_tracker.add(time.time(),
+                                      self.done_bytes + sum(self.ep_live.values()))
             except Exception:
                 pass
             self._update_bar()
@@ -1567,6 +1624,7 @@ class App:
             size = p.get("size", 0)
             self.ep_info.setdefault(key, {"est": None, "final": None})["final"] = size
             self.done_bytes += size
+            self.ep_live.pop(key, None)
             self._finish_row_bar(key)
             self._set_row_text(key, "%s — уже есть %s, пропуск" % (
                 self.ep_widgets.get(key, {}).get("head", "Серия"), fmt_mb(size)))
@@ -1575,8 +1633,7 @@ class App:
             size = p.get("size", p.get("size_mb", 0) * 1024 * 1024)
             self.ep_info.setdefault(key, {"est": None, "final": None})["final"] = size
             self.done_bytes += size
-            self._active_cur = 0
-            self._active_key = None
+            self.ep_live.pop(key, None)
             self._finish_row_bar(key)
             self._set_row_text(key, "%s — готово %s (%sp)" % (
                 self.ep_widgets.get(key, {}).get("head", "Серия"),
@@ -1584,8 +1641,7 @@ class App:
         elif ev == "ep_error":
             key = self._key(p["title"], p["num"])
             dl = p.get("downloaded", 0)
-            self._active_cur = 0
-            self._active_key = None
+            self.ep_live.pop(key, None)
             try:
                 w = self.ep_widgets.get(key)
                 if w:
@@ -1597,13 +1653,40 @@ class App:
                 str(p["error"])[:70],
                 (" · скачано %s" % fmt_mb(dl)) if dl else ""))
             # очередь продолжается — так задумано
+        elif ev == "ep_stop":
+            key = self._key(p["title"], p["num"])
+            self.ep_live.pop(key, None)
+            try:
+                w = self.ep_widgets.get(key)
+                if w:
+                    w["bar"].stop()
+            except Exception:
+                pass
+            self._set_row_bar(key, 0)
+            self._set_row_text(key, "%s — остановлено" % (
+                self.ep_widgets.get(key, {}).get("head", "Серия")))
         elif ev == "overall":
             self.ep_done = p["done"]
             self._update_bar()
         elif ev == "finished":
             self.set_state("done", "Готово. Файлы в папке.")
-            messagebox.showinfo("Готово", "Скачивание завершено.\nПапка: %s" % self.dir_var.get())
+            folder = self.dir_var.get()
+            # не блокируем насос очереди модальным окном
+            self.root.after_idle(
+                lambda: messagebox.showinfo(
+                    "Готово", "Скачивание завершено.\nПапка: %s" % folder))
         elif ev == "stopped":
+            # гасим бары, оставшиеся в indeterminate после отмены
+            for key, w in list(self.ep_widgets.items()):
+                if w.get("mode") == "ind":
+                    try:
+                        w["bar"].stop()
+                    except Exception:
+                        pass
+                    w["mode"] = "wait"
+                    self._set_row_bar(key, 0)
+                    self._set_row_text(key, "%s — остановлено" % w.get("head", "Серия"))
+            self.ep_live.clear()
             self.set_state("stopped", str(p))
         elif ev == "fatal":
             self.set_state("error", "Ошибка: %s" % str(p)[:160])
@@ -1630,7 +1713,7 @@ class App:
             pass
         # строка под баром: "5 из 12 · 620/2100 МБ · 4.1 МБ/с"
         try:
-            cur = self.done_bytes + self._active_cur
+            cur = self.done_bytes + sum(self.ep_live.values())
             ests = [v.get("est") for v in self.ep_info.values()]
             known = [e for e in ests if e]
             parts = ["%d из %d" % (self.ep_done, self.ep_total)]

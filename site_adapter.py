@@ -113,7 +113,7 @@ def is_tv_id(url_or_id):
 
 
 def get_adapter(url_or_id, cfg=None):
-    """Выбрать адаптера по входу: ссылка .tv / .me / голый page_id."""
+    """Выбрать адаптера по входу: ссылка .tv / .me / голый page_id / cfg['site']."""
     import site_me          # локальный импорт: адаптеры импортируют этот модуль
     import site_tv
     if is_tv_url(url_or_id):
@@ -124,10 +124,18 @@ def get_adapter(url_or_id, cfg=None):
         s = url_or_id.strip()
         if s.isdigit():
             return site_me.MeSite(cfg)
-        if is_me_url(s) or s.startswith("http"):
+        if is_me_url(s):
             return site_me.MeSite(cfg)
-    site = str((cfg or {}).get("site") or "")
-    if ME_HOST in site.lower():
+    site = str((cfg or {}).get("site") or "").lower()
+    if TV_HOST in site:
+        return site_tv.TvSite(cfg)
+    if ME_HOST in site:
         return site_me.MeSite(cfg)
+    if isinstance(url_or_id, str) and url_or_id.strip().startswith("http"):
+        return site_me.MeSite(cfg)
+    for cls in (site_tv.TvSite, site_me.MeSite):   # последний шанс: matches()
+        adapter = cls(cfg)
+        if adapter.matches(url_or_id):
+            return adapter
     raise RuntimeError("не знаю сайт по «%s»: жду %s или %s"
                        % (url_or_id, ME_HOST, TV_HOST))
